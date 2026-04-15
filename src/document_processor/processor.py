@@ -138,12 +138,15 @@ def main():
     parser.add_argument("--viz", "-v", default=None, help="输出标注图像路径（可选，仅第一页）")
     parser.add_argument("--dpi", type=int, default=200, help="PDF转换分辨率（默认200）")
     parser.add_argument("--lang", default="ch", help="OCR语言（ch/en等，默认ch）")
+    parser.add_argument("--use-nlp", dest="use_nlp", action="store_true", help="启用基于jieba的NLP敏感信息检测增强")
+    parser.add_argument("--no-nlp", dest="use_nlp", action="store_false", help="禁用NLP增强，仅使用规则检测")
+    parser.set_defaults(use_nlp=True)
     args = parser.parse_args()
 
     # 初始化 OCR（CPU模式）
     print("初始化 PaddleOCR...")
     ocr = PaddleOCR(lang=args.lang, use_textline_orientation=True)
-    detector = SensitiveDetector()
+    detector = SensitiveDetector(use_nlp=args.use_nlp)
 
     # 处理文档
     results = process_document(args.input, ocr, detector, args.json, args.viz, args.dpi)
