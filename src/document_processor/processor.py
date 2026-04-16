@@ -36,6 +36,7 @@ if not os.path.exists(poppler_path):
     poppler_path = None  # 使用系统默认路径
 
 # ========== 1. 敏感信息检测模块（内嵌，也可独立导入） ==========
+
 # ========== 2. 表格信息提取模块 ==========
 # 该功能已移到 src.table_extraction.extractor 模块。
 
@@ -71,21 +72,17 @@ def process_document(file_path: str,
     extractor = TableExtractor(ocr_model, poppler_path=poppler_path)
     for page_idx, img in enumerate(images):
         print(f"处理第 {page_idx+1} 页...")
-        h, w = img.shape[:2]
 
         # 1. 表格单元格提取
         print("开始表格单元格提取...")
         cells = extractor.extract_from_image(img)
-        print(f"OCR结果: {len(result[0]) if result and result[0] else 0} 行")
-        if not result or not result[0]:
+        print(f"提取到 {len(cells)} 个候选单元格")
+        if not cells:
             print("OCR无结果，跳过此页")
             all_pages.append({"page": page_idx, "cells": []})
             continue
 
-        # 2. 提取表格单元格并检测敏感信息
-        extractor = TableExtractor(ocr_model)
-        cells = extractor.extract_from_image(img)
-
+        # 2. 检测敏感信息
         for cell in cells:
             sens = detector.detect(cell['text'])
             cell['sensitive'] = sens
