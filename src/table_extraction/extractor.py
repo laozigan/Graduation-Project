@@ -14,7 +14,8 @@ def get_poppler_path(default_path: Optional[str] = None) -> Optional[str]:
 
 def convert_to_opencv(pil_image) -> np.ndarray:
     """将 PIL.Image 转换为 OpenCV BGR 图像。"""
-    return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    return np.ascontiguousarray(img)
 
 
 def load_images_from_file(file_path: str, dpi: int = 200, poppler_path: Optional[str] = None) -> List[np.ndarray]:

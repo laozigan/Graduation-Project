@@ -3,11 +3,12 @@
 """
 文档信息提取工具（支持 PDF / 图片）
 功能：
-1. 读取 PDF 或图片文件
-2. 对每页进行 OCR 和表格结构分析
-3. 提取单元格内容
-4. 检测其中的敏感信息（身份证、手机号、银行卡、邮箱、姓名、地址等）
-5. 输出 JSON 结果并可选生成标注图像
+1. 若输入为图片，先执行图像预处理（透视/方向/倾斜/增强）
+2. 读取 PDF 或图片文件
+3. 对每页进行 OCR 和表格结构分析
+4. 提取单元格内容
+5. 检测其中的敏感信息（身份证、手机号、银行卡、邮箱、姓名、地址等）
+6. 输出 JSON 结果并可选生成标注图像
 """
 
 import os
@@ -29,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.sensitive_detection import SensitiveDetector
 from src.table_extraction import TableExtractor, load_images_from_file
+from src.image_preprocessing import ImagePreprocessor, PreprocessConfig, SUPPORTED_IMAGE_EXTENSIONS
 
 # 检查poppler路径是否存在
 poppler_path = "D:/PrivacyProtectionSystem/poppler/Library/bin"
@@ -44,6 +46,34 @@ if not os.path.exists(poppler_path):
 # 文件加载逻辑同样由 src.table_extraction.extractor 管理。
 
 # ========== 4. 主处理流程 ==========
+def _is_image_file(file_path: str) -> bool:
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in SUPPORTED_IMAGE_EXTENSIONS
+
+
+def _build_preprocessed_path(input_path: str) -> str:
+    stem, _ = os.path.splitext(os.path.basename(input_path))
+    return os.path.join("outputs", "preprocessed", f"{stem}_pipeline_preprocessed.jpg")
+
+
+def _maybe_preprocess_input(file_path: str, lang: str, ocr_model: Optional[PaddleOCR] = None) -> str:
+    """图片输入时先做预处理，PDF直接返回原路径。"""
+    if not _is_image_file(file_path):
+        return file_path
+
+    output_path = _build_preprocessed_path(file_path)
+    print(f"检测到图片输入，开始预处理: {file_path}")
+    config = PreprocessConfig(lang=lang, use_ocr_orientation=True)
+    preprocessor = ImagePreprocessor(config=config, ocr_model=ocr_model)
+    result = preprocessor.preprocess_file(file_path, output_path)
+    print(
+        "图片预处理完成: "
+        f"output={result.output_path}, perspective={result.perspective_method}, "
+        f"orientation={result.orientation_angle}, skew={result.skew_angle}"
+    )
+    return result.output_path
+
+
 def process_document(file_path: str,
                      ocr_model: PaddleOCR,
                      detector: SensitiveDetector,
@@ -142,11 +172,14 @@ def main():
 
     # 初始化 OCR（CPU模式）
     print("初始化 PaddleOCR...")
-    ocr = PaddleOCR(lang=args.lang, use_textline_orientation=True)
+    ocr = PaddleOCR(lang=args.lang, use_angle_cls=True)
     detector = SensitiveDetector(use_nlp=args.use_nlp)
 
+    # 若输入是图片，先进行图像预处理，再进入后续主流程
+    pipeline_input = _maybe_preprocess_input(args.input, args.lang, ocr_model=ocr)
+
     # 处理文档
-    results = process_document(args.input, ocr, detector, args.json, args.viz, args.dpi)
+    results = process_document(pipeline_input, ocr, detector, args.json, args.viz, args.dpi)
 
     # 控制台打印摘要
     print("\n===== 检测摘要 =====")
