@@ -114,8 +114,9 @@ def process_document(file_path: str,
 
         # 2. 检测敏感信息
         for cell in cells:
-            sens = detector.detect(cell['text'])
-            cell['sensitive'] = sens
+            sensitives = detector.detect_all(cell['text'])
+            cell['sensitives'] = sensitives
+            cell['sensitive'] = detector._summarize_results(sensitives)
 
         # 5. 可选：生成标注图像
         if output_viz and page_idx == 0:  # 仅第一页示例

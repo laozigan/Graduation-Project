@@ -100,6 +100,17 @@ def cluster_text_boxes(ocr_results: List[Dict], vertical_threshold: int = 15, ho
     if not ocr_results:
         return []
 
+    heights = [r["bbox"][3] - r["bbox"][1] for r in ocr_results if r.get("bbox")]
+    median_height = float(np.median(heights)) if heights else 0.0
+    row_threshold = max(5.0, min(float(vertical_threshold), median_height * 0.6))
+
+    def overlap_ratio(a, b):
+        top = max(a[1], b[1])
+        bottom = min(a[3], b[3])
+        overlap = max(0.0, bottom - top)
+        min_h = max(1.0, min(a[3] - a[1], b[3] - b[1]))
+        return overlap / min_h
+
     for r in ocr_results:
         r["cy"] = (r["bbox"][1] + r["bbox"][3]) / 2
 
@@ -107,7 +118,7 @@ def cluster_text_boxes(ocr_results: List[Dict], vertical_threshold: int = 15, ho
     rows = []
     current_row = [sorted_by_y[0]]
     for box in sorted_by_y[1:]:
-        if abs(box["cy"] - current_row[0]["cy"]) <= vertical_threshold:
+        if abs(box["cy"] - current_row[0]["cy"]) <= row_threshold and overlap_ratio(box["bbox"], current_row[0]["bbox"]) >= 0.2:
             current_row.append(box)
         else:
             rows.append(current_row)
@@ -121,7 +132,7 @@ def cluster_text_boxes(ocr_results: List[Dict], vertical_threshold: int = 15, ho
         current = row[0]
         for next_box in row[1:]:
             gap = next_box["bbox"][0] - current["bbox"][2]
-            if gap <= horizontal_threshold:
+            if gap <= horizontal_threshold and overlap_ratio(current["bbox"], next_box["bbox"]) >= 0.3:
                 new_bbox = [
                     min(current["bbox"][0], next_box["bbox"][0]),
                     min(current["bbox"][1], next_box["bbox"][1]),

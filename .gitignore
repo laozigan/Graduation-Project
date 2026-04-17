@@ -4,3 +4,4 @@ data/**
 __pychache__/**
 *.pyc
 tests/**
+outputs/**

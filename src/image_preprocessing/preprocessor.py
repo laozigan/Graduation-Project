@@ -125,9 +125,9 @@ def _four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
 class ImagePreprocessor:
     """独立图像预处理器（仅图片输入）。"""
 
-    def __init__(self, config: Optional[PreprocessConfig] = None):
+    def __init__(self, config: Optional[PreprocessConfig] = None, ocr_model: Optional[PaddleOCR] = None):
         self.config = config or PreprocessConfig()
-        self._ocr_model: Optional[PaddleOCR] = None
+        self._ocr_model: Optional[PaddleOCR] = ocr_model
 
     def _get_ocr_model(self) -> Optional[PaddleOCR]:
         if not self.config.use_ocr_orientation or PaddleOCR is None:

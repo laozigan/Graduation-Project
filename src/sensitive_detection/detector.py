@@ -31,20 +31,28 @@ class SensitiveDetector:
             self.has_jieba = False
 
     def detect(self, text: str):
+        """返回单一最佳分类，兼容旧接口。"""
+        results = self.detect_all(text)
+        return self._summarize_results(results)
+
+    def detect_all(self, text: str):
         """
-        检测单个文本中的敏感信息。
-        返回: {
-            'is_sensitive': bool,
-            'type': str,          # 敏感类型
-            'confidence': float,  # 0-1
-            'match_details': [...] # 匹配到的具体内容（可选）
-        }
-        若无敏感信息，返回 {'is_sensitive': False}
+        检测单个文本中的敏感信息，返回多种类型命中结果。
+        返回: [
+            {
+                'is_sensitive': True,
+                'type': str,
+                'confidence': float,
+                'match_details': [...]
+            },
+            ...
+        ]
         """
         if not text or not text.strip():
-            return {'is_sensitive': False}
+            return []
 
         text_clean = text.strip()
+        results = []
 
         # 0. 强语境优先：社保号标签下的数值优先归类为 social_security，避免被身份证正则抢先命中
         social_label_match = re.search(r'(?:社保号|社保编号|社会保障号|社会保险号|医保号|养老保险号)\s*[：:]\s*([A-Za-z0-9\-]{8,25})', text_clean)
@@ -52,26 +60,22 @@ class SensitiveDetector:
             value = social_label_match.group(1).strip()
             ssn_matches = re.findall(self.regex_patterns['social_security'], value)
             if ssn_matches:
-                return {
-                    'is_sensitive': True,
-                    'type': 'social_security',
-                    'confidence': 0.9,
-                    'match_details': ssn_matches
-                }
+                self._append_result(results, 'social_security', 0.9, ssn_matches)
 
-        # 1. 正则匹配（最高优先级）
+        id_matches = []
+        # 1. 正则匹配（基础命中）
         for sens_type, pattern in self.regex_patterns.items():
             # 出生日期属于高频普通信息，避免全局日期误报，仅在语境规则里检测
             if sens_type in ('birth_date', 'social_security', 'passport'):
                 continue
-            matches = re.findall(pattern, text_clean)
+            matches = self._find_regex_matches(pattern, text_clean)
             if matches:
-                return {
-                    'is_sensitive': True,
-                    'type': sens_type,
-                    'confidence': 1.0,
-                    'match_details': matches
-                }
+                if sens_type == 'id_card':
+                    id_matches.extend(matches)
+                confidence = 0.85 if sens_type == 'address' else 1.0
+                if sens_type == 'phone':
+                    matches = self._filter_phone_matches(matches, id_matches)
+                self._append_result(results, sens_type, confidence, matches)
 
         # 2. 键值对标签提取：仅识别 label:value 中的值为敏感信息
         label_value_patterns = {
@@ -85,97 +89,59 @@ class SensitiveDetector:
         }
         for label, pattern in label_value_patterns.items():
             match = re.search(pattern, text_clean)
-            if match:
-                value = match.group(1).strip()
-                if label == 'name':
-                    name_matches = self.chinese_name_pattern.findall(value)
-                    if name_matches:
-                        return {
-                            'is_sensitive': True,
-                            'type': 'name',  # 键值对中的姓名类型
-                            'confidence': 0.9,
-                            'match_details': name_matches
-                        }
-                elif label == 'phone':
-                    phone_matches = re.findall(self.regex_patterns['phone'], value)
-                    if phone_matches:
-                        return {
-                            'is_sensitive': True,
-                            'type': 'phone',
-                            'confidence': 1.0,
-                            'match_details': phone_matches
-                        }
-                elif label == 'id':
-                    id_matches = re.findall(self.regex_patterns['id_card'], value)
-                    if id_matches:
-                        return {
-                            'is_sensitive': True,
-                            'type': 'id_card',
-                            'confidence': 1.0,
-                            'match_details': id_matches
-                        }
-                elif label == 'address':
-                    # 地址值本身视为敏感（可扩展为具体地址验证）
-                    return {
-                        'is_sensitive': True,
-                        'type': 'address',
-                        'confidence': 0.8,
-                        'match_details': [value]
-                    }
-                elif label == 'birth_date':
-                    date_matches = re.findall(self.regex_patterns['birth_date'], value)
-                    if date_matches:
-                        return {
-                            'is_sensitive': True,
-                            'type': 'birth_date',
-                            'confidence': 0.9,
-                            'match_details': date_matches
-                        }
-                elif label == 'social_security':
-                    ssn_matches = re.findall(self.regex_patterns['social_security'], value)
-                    if ssn_matches:
-                        return {
-                            'is_sensitive': True,
-                            'type': 'social_security',
-                            'confidence': 0.9,
-                            'match_details': ssn_matches
-                        }
-                elif label == 'passport':
-                    passport_matches = re.findall(self.regex_patterns['passport'], value)
-                    if passport_matches:
-                        return {
-                            'is_sensitive': True,
-                            'type': 'passport',
-                            'confidence': 0.9,
-                            'match_details': passport_matches
-                        }
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if label == 'name':
+                name_matches = self.chinese_name_pattern.findall(value)
+                if name_matches:
+                    self._append_result(results, 'name', 0.9, name_matches)
+            elif label == 'phone':
+                phone_matches = re.findall(self.regex_patterns['phone'], value)
+                phone_matches = self._filter_phone_matches(phone_matches, id_matches)
+                if phone_matches:
+                    self._append_result(results, 'phone', 1.0, phone_matches)
+            elif label == 'id':
+                id_matches = re.findall(self.regex_patterns['id_card'], value)
+                if id_matches:
+                    self._append_result(results, 'id_card', 1.0, id_matches)
+            elif label == 'address':
+                self._append_result(results, 'address', 0.8, [value])
+            elif label == 'birth_date':
+                date_matches = re.findall(self.regex_patterns['birth_date'], value)
+                if date_matches:
+                    self._append_result(results, 'birth_date', 0.9, date_matches)
+            elif label == 'social_security':
+                ssn_matches = re.findall(self.regex_patterns['social_security'], value)
+                if ssn_matches:
+                    self._append_result(results, 'social_security', 0.9, ssn_matches)
+            elif label == 'passport':
+                passport_matches = re.findall(self.regex_patterns['passport'], value)
+                if passport_matches:
+                    self._append_result(results, 'passport', 0.9, passport_matches)
 
         # 3. 轻量级NLP优先检测姓名上下文
         if self.use_nlp:
             nlp_result = self._nlp_detect(text_clean)
             if nlp_result:
-                return nlp_result
+                self._append_result(results, nlp_result['type'], nlp_result['confidence'], nlp_result.get('match_details', []))
+
+        structured_types = {'id_card', 'phone', 'email', 'bank_card', 'address'}
+        has_structured_pii = any(item.get('type') in structured_types for item in results)
+
+        if has_structured_pii:
+            leading_names = self._extract_leading_names(text_clean)
+            if leading_names:
+                self._append_result(results, 'chinese_name', 0.88, leading_names)
 
         # 4. 中文姓名正则检测（纯值，仅当不含标签且文本较短时）
-        if not any(kw in text_clean for kw_list in self.keyword_categories.values() for kw in kw_list):
+        if not has_structured_pii and not any(kw in text_clean for kw_list in self.keyword_categories.values() for kw in kw_list):
             if len(text_clean) <= 4 or self._is_name_context(text_clean):
                 name_matches = self._filter_name_matches(self.chinese_name_pattern.findall(text_clean))
                 if name_matches:
-                    return {
-                        'is_sensitive': True,
-                        'type': 'chinese_name',
-                        'confidence': 0.9,
-                        'match_details': name_matches
-                    }
+                    self._append_result(results, 'chinese_name', 0.9, name_matches)
 
-        # 5. 关键词匹配（只作为辅助标签检测，不单独判定为敏感）
-        # 关键词存在本身不足以判定敏感信息，必须依赖具体值或正则匹配。
-        for cat, kw_list in self.keyword_categories.items():
-            for kw in kw_list:
-                if kw in text_clean:
-                    continue
-
-        return {'is_sensitive': False}
+        return results
 
     def _is_name_context(self, text):
         """判断文本是否包含明确的人名语境"""
@@ -194,7 +160,7 @@ class SensitiveDetector:
         if candidate in self.name_blacklist:
             return True
         # 带有明显语义词后缀，通常不是人名
-        for suffix in ('公司', '电话', '地址', '方式', '信息', '号码', '部门', '职位', '姓名', '经验', '籍贯'):
+        for suffix in ('公司', '电话', '地址', '方式', '信息', '号码', '部门', '职位', '姓名', '经验', '籍贯', '盖章', '印章'):
             if candidate.endswith(suffix):
                 return True
         return False
@@ -242,6 +208,7 @@ class SensitiveDetector:
         # 使用 jieba 分词进一步辅助判断，避免将句子中的片段误识别为人名
         if self.has_jieba:
             tokens = self.jieba.lcut(text)
+            id_matches_in_text = self._find_regex_matches(self.regex_patterns['id_card'], text)
 
             # 关键词 + 邻近值识别（姓名）
             name_keywords = {'姓名', '名字', '名叫', '称呼', '我叫', '我名叫'}
@@ -266,6 +233,7 @@ class SensitiveDetector:
                 if token in phone_keywords:
                     span = ''.join(tokens[index + 1:index + 5]).replace(' ', '')
                     phone_matches = re.findall(self.regex_patterns['phone'], span)
+                    phone_matches = self._filter_phone_matches(phone_matches, id_matches_in_text)
                     if phone_matches:
                         return {
                             'is_sensitive': True,
@@ -326,13 +294,95 @@ class SensitiveDetector:
             }
         return None
 
+    def _summarize_results(self, results):
+        if not results:
+            return {'is_sensitive': False}
+        priority = [
+            'id_card', 'phone', 'email', 'bank_card', 'social_security',
+            'passport', 'address', 'birth_date', 'name', 'chinese_name',
+            'id', 'medical'
+        ]
+        priority_index = {name: idx for idx, name in enumerate(priority)}
+        best = sorted(
+            results,
+            key=lambda r: (-r.get('confidence', 0.0), priority_index.get(r.get('type'), 999))
+        )[0]
+        summary = {
+            'is_sensitive': True,
+            'type': best.get('type', 'unknown'),
+            'confidence': best.get('confidence', 0.0),
+            'match_details': best.get('match_details', [])
+        }
+        return summary
+
+    def _find_regex_matches(self, pattern, text):
+        return [m.group(0) for m in re.finditer(pattern, text)]
+
+    def _append_result(self, results, sens_type, confidence, match_details):
+        if not match_details:
+            return
+        for existing in results:
+            if existing.get('type') == sens_type:
+                details = existing.setdefault('match_details', [])
+                for item in match_details:
+                    if item not in details:
+                        details.append(item)
+                existing['confidence'] = max(existing.get('confidence', 0.0), confidence)
+                return
+        results.append({
+            'is_sensitive': True,
+            'type': sens_type,
+            'confidence': confidence,
+            'match_details': match_details
+        })
+
+    def _extract_leading_names(self, text):
+        anchor_positions = []
+        for key in ('id_card', 'phone', 'email', 'bank_card'):
+            pattern = self.regex_patterns.get(key)
+            if not pattern:
+                continue
+            match = re.search(pattern, text)
+            if match:
+                anchor_positions.append(match.start())
+
+        if not anchor_positions:
+            digit_match = re.search(r'\d', text)
+            if digit_match:
+                anchor_positions.append(digit_match.start())
+
+        if not anchor_positions:
+            return []
+        anchor = min(anchor_positions)
+
+        prefix = text[:anchor]
+        if not prefix:
+            return []
+        prefix = re.sub(r'(姓名|身份证|身份证号|手机号|手机|电话|住址|地址|邮箱|电子邮箱|银行卡号)', ' ', prefix)
+        prefix = re.sub(r'[，,。;；:：|/\\\-]+', ' ', prefix)
+        matches = self.chinese_name_pattern.findall(prefix)
+        filtered = self._filter_name_matches(matches)
+        # 保持顺序去重
+        return list(dict.fromkeys(filtered))
+
+    def _filter_phone_matches(self, phone_matches, id_matches):
+        if not phone_matches or not id_matches:
+            return phone_matches
+        filtered = []
+        for phone in phone_matches:
+            if any(phone in id_value for id_value in id_matches):
+                continue
+            filtered.append(phone)
+        return filtered
+
     def detect_cells(self, cells):
         """
         批量检测单元格列表。
         cells: list of dict, 每个包含 'text' 和可选的 'bbox'
-        返回: 每个单元格增加 'sensitive' 字段
+        返回: 每个单元格增加 'sensitive' 和 'sensitives' 字段
         """
         for cell in cells:
-            result = self.detect(cell['text'])
-            cell['sensitive'] = result
+            results = self.detect_all(cell['text'])
+            cell['sensitives'] = results
+            cell['sensitive'] = self._summarize_results(results)
         return cells
