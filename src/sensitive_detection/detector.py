@@ -1,8 +1,9 @@
 import re
 from .patterns import REGEX_PATTERNS, KEYWORD_CATEGORIES, CHINESE_NAME_REGEX
+from .uie_extractor import UIEXNameExtractor
 
 class SensitiveDetector:
-    def __init__(self, use_nlp=False):
+    def __init__(self, use_nlp=False, enable_uie=False, uie_model='uie-x-base', uie_schema=None):
         self.regex_patterns = REGEX_PATTERNS
         self.keyword_categories = KEYWORD_CATEGORIES
         self.chinese_name_pattern = re.compile(CHINESE_NAME_REGEX)
@@ -12,13 +13,20 @@ class SensitiveDetector:
             '籍贯', '经验', '工作经验', '项目经验'
         }
         self.use_nlp = use_nlp
+        self.enable_uie = enable_uie
         self.has_jieba = False
+        self.has_uie = False
+        self.uie_model = uie_model
+        self.uie_schema = uie_schema or ['姓名', '名字', '联系人', '申请人']
+        self.uie_extractor = None
         self.name_context_patterns = [
             re.compile(r'(?:我叫|我名叫|我姓|姓名(?:是|：|:)?|名字(?:是|：|:)?|名叫|称呼(?:是|：|:)?)\s*([\u4e00-\u9fa5]{2,3})'),
             re.compile(r'([\u4e00-\u9fa5]{2,3})\s*(?:是|为)\s*(?:我的)?(?:名字|姓名)'),
         ]
         if use_nlp:
             self._init_nlp()
+        if enable_uie:
+            self._init_uie()
 
     def _init_nlp(self):
         """初始化轻量级NLP（例如基于jieba分词+规则）"""
@@ -29,6 +37,17 @@ class SensitiveDetector:
         except ImportError:
             print("Warning: jieba not installed, jieba tokenization disabled")
             self.has_jieba = False
+
+    def _init_uie(self):
+        """初始化 UIE-X 抽取器（可选，失败时自动降级）。"""
+        self.uie_extractor = UIEXNameExtractor(
+            model=self.uie_model,
+            schema=self.uie_schema,
+            allow_model_fallback=False,
+        )
+        self.has_uie = bool(self.uie_extractor.available)
+        if not self.has_uie:
+            print(f"Warning: UIE extractor unavailable, fallback to rules/NLP. Detail: {self.uie_extractor.init_error}")
 
     def detect(self, text: str):
         """返回单一最佳分类，兼容旧接口。"""
@@ -120,7 +139,13 @@ class SensitiveDetector:
                 if passport_matches:
                     self._append_result(results, 'passport', 0.9, passport_matches)
 
-        # 3. 轻量级NLP优先检测姓名上下文
+        # 3. UIE-X 语义抽取（姓名增强）
+        if self.enable_uie and self.has_uie:
+            uie_result = self._uie_detect(text_clean)
+            if uie_result:
+                self._append_result(results, uie_result['type'], uie_result['confidence'], uie_result.get('match_details', []))
+
+        # 4. 轻量级NLP兜底
         if self.use_nlp:
             nlp_result = self._nlp_detect(text_clean)
             if nlp_result:
@@ -132,14 +157,14 @@ class SensitiveDetector:
         if has_structured_pii:
             leading_names = self._extract_leading_names(text_clean)
             if leading_names:
-                self._append_result(results, 'chinese_name', 0.88, leading_names)
+                self._append_result(results, 'name', 0.88, leading_names)
 
-        # 4. 中文姓名正则检测（纯值，仅当不含标签且文本较短时）
+        # 5. 中文姓名正则检测（纯值，仅当不含标签且文本较短时）
         if not has_structured_pii and not any(kw in text_clean for kw_list in self.keyword_categories.values() for kw in kw_list):
             if len(text_clean) <= 4 or self._is_name_context(text_clean):
                 name_matches = self._filter_name_matches(self.chinese_name_pattern.findall(text_clean))
                 if name_matches:
-                    self._append_result(results, 'chinese_name', 0.9, name_matches)
+                    self._append_result(results, 'name', 0.9, name_matches)
 
         return results
 
@@ -189,6 +214,41 @@ class SensitiveDetector:
             else:
                 break
         return None
+
+    def _uie_detect(self, text):
+        """使用 UIE-X 抽取姓名并返回统一结构。"""
+        if not self.has_uie or self.uie_extractor is None:
+            return None
+
+        name_hits = self.uie_extractor.extract_names(text)
+        if not name_hits:
+            return None
+
+        filtered_names = []
+        max_confidence = 0.0
+        for hit in name_hits:
+            candidate = str(hit.get('text', '')).strip()
+            if not candidate:
+                continue
+            if not re.fullmatch(r'[\u4e00-\u9fa5]{2,4}|[\u4e00-\u9fa5]{1,3}[·•][\u4e00-\u9fa5]{1,3}', candidate):
+                continue
+            if self._is_blacklisted_name(candidate):
+                continue
+            filtered_names.append(candidate)
+            max_confidence = max(max_confidence, float(hit.get('confidence', 0.0) or 0.0))
+
+        if not filtered_names:
+            return None
+
+        filtered_names = list(dict.fromkeys(filtered_names))
+        keyword_boost = 0.05 if re.search(r'(姓名|名字|联系人|申请人|病人姓名|客户姓名|员工姓名)\s*[：:]?', text) else 0.0
+        confidence = min(0.98, max(0.82, max_confidence + keyword_boost))
+        return {
+            'is_sensitive': True,
+            'type': 'name',
+            'confidence': confidence,
+            'match_details': filtered_names
+        }
 
     def _nlp_detect(self, text):
         """基于简单规则或分词的检测"""
@@ -299,7 +359,7 @@ class SensitiveDetector:
             return {'is_sensitive': False}
         priority = [
             'id_card', 'phone', 'email', 'bank_card', 'social_security',
-            'passport', 'address', 'birth_date', 'name', 'chinese_name',
+            'passport', 'address', 'birth_date', 'name',
             'id', 'medical'
         ]
         priority_index = {name: idx for idx, name in enumerate(priority)}
@@ -379,10 +439,9 @@ class SensitiveDetector:
         """
         批量检测单元格列表。
         cells: list of dict, 每个包含 'text' 和可选的 'bbox'
-        返回: 每个单元格增加 'sensitive' 和 'sensitives' 字段
+        返回: 每个单元格增加 'sensitives' 字段
         """
         for cell in cells:
             results = self.detect_all(cell['text'])
             cell['sensitives'] = results
-            cell['sensitive'] = self._summarize_results(results)
         return cells

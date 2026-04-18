@@ -13,7 +13,6 @@ class SensitiveDetectionEvaluator:
     def __init__(self):
         self.sensitive_types = [
             "name",
-            "chinese_name",
             "phone",
             "email",
             "bank_card",
@@ -142,12 +141,16 @@ class SensitiveDetectionEvaluator:
             for sens in sensitives:
                 sens_type = sens.get("type")
                 if sens_type:
+                    if sens_type == "chinese_name":
+                        sens_type = "name"
                     types.add(sens_type)
 
         sensitive = item.get("sensitive", {})
         if isinstance(sensitive, dict) and sensitive.get("is_sensitive"):
             sens_type = sensitive.get("type")
             if sens_type:
+                if sens_type == "chinese_name":
+                    sens_type = "name"
                 types.add(sens_type)
 
         return types
@@ -297,15 +300,15 @@ if __name__ == "__main__":
     evaluator = SensitiveDetectionEvaluator()
 
     sample_predictions = [
-        {"text": "姓名：张三", "sensitive": {"is_sensitive": True, "type": "name"}},
-        {"text": "电话：13800138000", "sensitive": {"is_sensitive": True, "type": "phone"}},
-        {"text": "这是一段普通文本", "sensitive": {"is_sensitive": False}},
+        {"text": "姓名：张三", "sensitives": [{"is_sensitive": True, "type": "name"}]},
+        {"text": "电话：13800138000", "sensitives": [{"is_sensitive": True, "type": "phone"}]},
+        {"text": "这是一段普通文本", "sensitives": []},
     ]
 
     sample_ground_truth = [
-        {"text": "姓名：张三", "sensitive": {"is_sensitive": True, "type": "name"}},
-        {"text": "电话：13800138000", "sensitive": {"is_sensitive": True, "type": "phone"}},
-        {"text": "这是一段普通文本", "sensitive": {"is_sensitive": False}},
+        {"text": "姓名：张三", "sensitives": [{"is_sensitive": True, "type": "name"}]},
+        {"text": "电话：13800138000", "sensitives": [{"is_sensitive": True, "type": "phone"}]},
+        {"text": "这是一段普通文本", "sensitives": []},
     ]
 
     results = evaluator.evaluate_predictions(sample_predictions, sample_ground_truth)

@@ -3,7 +3,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.sensitive_detection.detector import SensitiveDetector
 
-detector = SensitiveDetector()
+detector = SensitiveDetector(use_nlp=True, enable_uie=True, uie_model='uie-x-base')
+print(f"UIE available: {detector.has_uie}")
 
 test_cases = [
     # 身份证号（18 位，最后一位可能是数字或 X/x）
@@ -21,16 +22,16 @@ test_cases = [
     ("test@example.com", "email"),
     ("user.name@domain.co.uk", "email"),
     # 关键词
-    ("我的姓名是张三", None),
+    ("我的姓名是张三", "name"),
     ("家庭住址: 北京市朝阳区", "address"),
     ("身份证号：11010119900307663X", "id_card"),
     ("联系电话：13812345678", "phone"),
     ("今天天气不错", None),
     ("邮箱 test@example.com", "email"),
     ("表格内容: 二氧化碳排放量", None),
-    ("张三", "chinese_name"),
-    ("欧阳娜娜", "chinese_name"),
-    ("我是张三", "chinese_name"),
+    ("张三", "name"),
+    ("欧阳娜娜", "name"),
+    ("我是张三", "name"),
     ("11010119900307663X", "id_card"),
     ("身份证号: 11010119900307663x", "id_card"),
     ("手机: 13812345678", "phone"),

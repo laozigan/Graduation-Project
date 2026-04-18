@@ -26,5 +26,7 @@ results = process_document(
 for page in results:
     print(f"第 {page['page']+1} 页有 {len(page['cells'])} 个单元格")
     for cell in page['cells']:
-        if cell['sensitive']['is_sensitive']:
-            print(f"敏感内容: {cell['text']} -> {cell['sensitive']['type']}")
+        sensitives = cell.get('sensitives', [])
+        if sensitives:
+            main_type = sensitives[0].get('type', 'unknown')
+            print(f"敏感内容: {cell['text']} -> {main_type}")

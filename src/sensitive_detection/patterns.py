@@ -1,11 +1,12 @@
 # 敏感信息模式库
 PROVINCE_NON_MUNI = r'(?:[\u4e00-\u9fa5]{2,6}省|[\u4e00-\u9fa5]{2,6}自治区|[\u4e00-\u9fa5]{2,6}特别行政区)'
 MUNICIPALITY = r'(?:北京市|上海市|重庆市|天津市)'
-CITY = r'(?:[\u4e00-\u9fa5]{2,6}市)'
-COUNTY = r'(?:[\u4e00-\u9fa5]{2,6}(?:区|县|旗|市|州))'
+CITY = r'(?:[\u4e00-\u9fa5]{1,6}市)'
+COUNTY = r'(?:[\u4e00-\u9fa5]{1,6}(?:区|县|旗|市|州))'
 TOWN = r'(?:[\u4e00-\u9fa5A-Za-z0-9]{1,10}(?:镇|乡|街道|街|路|巷|村|湾|弄|号|座|楼|苑|园|里))'
-ADDRESS_PREFIX = rf'(?:{PROVINCE_NON_MUNI}{CITY}|{MUNICIPALITY})'
-ADDRESS_REGEX = rf'{ADDRESS_PREFIX}(?:{COUNTY})?(?:{TOWN}){{0,4}}'
+# 兼容“省+市(+区县)”与“省+县(跳过市)”写法，同时保留直辖市地址
+ADDRESS_PREFIX = rf'(?:{PROVINCE_NON_MUNI}(?:{CITY}(?:{COUNTY})?|{COUNTY})|{MUNICIPALITY}(?:{COUNTY})?)'
+ADDRESS_REGEX = rf'{ADDRESS_PREFIX}(?:{TOWN}){{0,4}}'
 
 REGEX_PATTERNS = {
     'bank_card': r'^62\d{14,17}$',

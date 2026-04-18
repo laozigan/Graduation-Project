@@ -7,13 +7,23 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+ENABLE_MKLDNN = _env_flag('PPS_ENABLE_MKLDNN', False)
+os.environ['FLAGS_use_mkldnn'] = '1' if ENABLE_MKLDNN else '0'
+os.environ['FLAGS_use_mkldnn_common_opt'] = '1' if ENABLE_MKLDNN else '0'
+os.environ['FLAGS_enable_pir_api'] = '0'
+os.environ['FLAGS_enable_pir_in_executor'] = '0'
+
 import cv2
 import numpy as np
 
-try:
-    from paddleocr import PaddleOCR
-except Exception:
-    PaddleOCR = None
+from paddleocr import PaddleOCR
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {
