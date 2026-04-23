@@ -9,13 +9,16 @@ areas and protects table lines/cell borders to preserve table structure.
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
+from .advbox_generator import AdvBoxROIAttackParams, run_advbox_roi_attack
 from src.image_preprocessing import ImagePreprocessor, PreprocessConfig
 from src.table_extraction import convert_ocr_result_to_boxes, load_images_from_file
 
@@ -25,6 +28,7 @@ class AttackConfig:
     epsilon: float = 14.0
     alpha: float = 3.0
     steps: int = 5
+    attack_method: str = "random"
     seed: int = 2026
     bbox_margin: int = 2
     text_threshold_block_size: int = 25
@@ -35,6 +39,21 @@ class AttackConfig:
     adaptive_detect_missing_cells: bool = True
     adaptive_use_nlp: bool = True
     adaptive_ocr_lang: str = "ch"
+    pgd_align_weight: float = 1.0
+    pgd_magnitude_weight: float = 0.3
+    pgd_edge_weight: float = 0.05
+    advbox_roi_expand: int = 8
+    advbox_restarts: int = 3
+    advbox_momentum: float = 0.8
+    advbox_attack_name: str = "PGD"
+    advbox_epsilon_steps: int = 6
+    advbox_spsa_sigma: float = 2.0
+    advbox_spsa_samples: int = 4
+    advbox_text_change_bonus: float = 0.5
+    advbox_rec_model: str = "PP-OCRv5_server_rec"
+    enable_mkldnn: bool = False
+    num_threads: int = 0
+    image_scale: float = 1.0
 
 
 @dataclass
@@ -64,8 +83,85 @@ class AdversarialPerturbator:
         self.config = config or AttackConfig()
         self._adaptive_ocr_model = None
         self._adaptive_detector = None
+        self._advbox_recognizer = None
+        self._pgd_fallback_warned = False
+        self._advbox_fallback_warned = False
+        self._advbox_backend = self._detect_advbox_backend()
+        self._configure_runtime()
+
+    @staticmethod
+    def _detect_advbox_backend() -> str:
+        # Keep this lightweight so the class can run even when optional libs are absent.
+        project_root = Path(__file__).resolve().parents[2]
+        if (project_root / "AdvBox").exists():
+            return "local_advbox"
+        if importlib.util.find_spec("advbox") is not None:
+            return "advbox"
+        if importlib.util.find_spec("adversarialbox") is not None:
+            return "adversarialbox"
+        return "none"
+
+    def _configure_runtime(self) -> None:
+        """Configure runtime knobs before model initialization for better CPU performance."""
+        if self.config.enable_mkldnn:
+            os.environ["FLAGS_use_mkldnn"] = "1"
+            os.environ["FLAGS_use_mkldnn_common_opt"] = "1"
+
+        if self.config.num_threads > 0:
+            thread_str = str(self.config.num_threads)
+            os.environ["OMP_NUM_THREADS"] = thread_str
+            os.environ["MKL_NUM_THREADS"] = thread_str
+            os.environ["OPENBLAS_NUM_THREADS"] = thread_str
+            try:
+                cv2.setNumThreads(self.config.num_threads)
+            except Exception:
+                pass
+        else:
+            try:
+                cv2.setUseOptimized(True)
+            except Exception:
+                pass
 
     def apply_to_page(
+        self,
+        image: np.ndarray,
+        cells: Sequence[Dict[str, Any]],
+        return_report: bool = False,
+    ) -> Any:
+        if image is None or image.size == 0:
+            raise ValueError("input image is empty")
+
+        scale = float(self.config.image_scale)
+        if scale <= 0.0:
+            scale = 1.0
+
+        # Optional downscale for faster optimization; results are resized back.
+        if abs(scale - 1.0) > 1e-6:
+            scaled_image, scaled_cells = _scale_image_and_cells(image, cells, scale)
+            attacked_scaled, report = self._apply_to_page_core(scaled_image, scaled_cells, return_report=True)
+            upsampled = cv2.resize(
+                attacked_scaled,
+                (image.shape[1], image.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            # Only paste back truly perturbed regions to avoid full-image resampling artifacts.
+            scaled_changed = np.any(attacked_scaled != scaled_image, axis=2).astype(np.uint8)
+            changed_mask = cv2.resize(
+                scaled_changed,
+                (image.shape[1], image.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            ) > 0
+            attacked = image.copy()
+            attacked[changed_mask] = upsampled[changed_mask]
+            report["total_pixels"] = int(image.shape[0] * image.shape[1])
+            report["changed_pixels"] = int(np.count_nonzero(np.any(attacked != image, axis=2)))
+            if return_report:
+                return attacked, report
+            return attacked
+
+        return self._apply_to_page_core(image, cells, return_report=return_report)
+
+    def _apply_to_page_core(
         self,
         image: np.ndarray,
         cells: Sequence[Dict[str, Any]],
@@ -96,9 +192,20 @@ class AdversarialPerturbator:
         rng = np.random.default_rng(self.config.seed)
         original = image.astype(np.float32)
         delta = np.zeros_like(original, dtype=np.float32)
+        attack_method = (self.config.attack_method or "random").strip().lower().replace("-", "_")
 
         for bbox in sensitive_bboxes:
             x1, y1, x2, y2 = self._sanitize_bbox(bbox, image.shape[1], image.shape[0])
+            if attack_method == "advbox_roi" and int(self.config.advbox_roi_expand) > 0:
+                x1, y1, x2, y2 = self._expand_bbox(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    int(self.config.advbox_roi_expand),
+                    image.shape[1],
+                    image.shape[0],
+                )
             if x2 <= x1 or y2 <= y1:
                 continue
 
@@ -128,10 +235,30 @@ class AdversarialPerturbator:
             writable_3c = writable[..., None].astype(np.float32)
             roi_delta = delta[y1:y2, x1:x2]
 
-            for _ in range(self.config.steps):
-                noise = self._gen_attack_pattern(roi_h, roi_w, rng)
-                step = (self.config.alpha * noise)[..., None]
-                roi_delta = np.clip(roi_delta + step * writable_3c, -self.config.epsilon, self.config.epsilon)
+            if attack_method == "advbox_roi":
+                # AdvBox-style ROI optimization with multi-restart and momentum ascent.
+                roi_delta = self._optimize_delta_advbox_roi(
+                    roi_delta=roi_delta,
+                    original_roi=original[y1:y2, x1:x2],
+                    writable_3c=writable_3c,
+                    rng=rng,
+                )
+            elif attack_method == "pgd":
+                # White-box-style PGD on differentiable surrogate objective in writable text region.
+                roi_delta = self._optimize_delta_pgd(
+                    roi_delta=roi_delta,
+                    original_roi=original[y1:y2, x1:x2],
+                    writable_3c=writable_3c,
+                    rng=rng,
+                )
+            else:
+                roi_delta = self._optimize_delta_random(
+                    roi_delta=roi_delta,
+                    writable_3c=writable_3c,
+                    roi_h=roi_h,
+                    roi_w=roi_w,
+                    rng=rng,
+                )
 
             delta[y1:y2, x1:x2] = roi_delta
 
@@ -142,6 +269,257 @@ class AdversarialPerturbator:
         if return_report:
             return attacked, report
         return attacked
+
+    def _optimize_delta_random(
+        self,
+        roi_delta: np.ndarray,
+        writable_3c: np.ndarray,
+        roi_h: int,
+        roi_w: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        for _ in range(self.config.steps):
+            noise = self._gen_attack_pattern(roi_h, roi_w, rng)
+            step = (self.config.alpha * noise)[..., None]
+            roi_delta = np.clip(roi_delta + step * writable_3c, -self.config.epsilon, self.config.epsilon)
+        return roi_delta
+
+    def _optimize_delta_pgd(
+        self,
+        roi_delta: np.ndarray,
+        original_roi: np.ndarray,
+        writable_3c: np.ndarray,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        try:
+            import paddle
+        except Exception:
+            if not self._pgd_fallback_warned:
+                print("Warning: paddle unavailable for PGD, fallback to random attack pattern.")
+                self._pgd_fallback_warned = True
+            return self._optimize_delta_random(
+                roi_delta=roi_delta,
+                writable_3c=writable_3c,
+                roi_h=roi_delta.shape[0],
+                roi_w=roi_delta.shape[1],
+                rng=rng,
+            )
+
+        if int(np.count_nonzero(writable_3c)) <= 0:
+            return roi_delta
+
+        eps = float(self.config.epsilon) / 255.0
+        alpha = float(self.config.alpha) / 255.0
+
+        original_norm = np.clip(original_roi / 255.0, 0.0, 1.0).astype(np.float32)
+        delta_norm = np.clip(roi_delta / 255.0, -eps, eps).astype(np.float32)
+        mask_np = writable_3c.astype(np.float32)
+
+        # Fixed target pattern guides PGD direction and avoids zero-gradient starts.
+        pattern = self._gen_attack_pattern(roi_delta.shape[0], roi_delta.shape[1], rng)[..., None]
+        target_np = np.repeat(pattern, 3, axis=2).astype(np.float32)
+
+        orig_t = paddle.to_tensor(original_norm, stop_gradient=True)
+        mask_t = paddle.to_tensor(mask_np, stop_gradient=True)
+        target_t = paddle.to_tensor(target_np, stop_gradient=True)
+        delta_t = paddle.to_tensor(delta_norm)
+        delta_t.stop_gradient = False
+
+        for _ in range(max(1, int(self.config.steps))):
+            adv_t = paddle.clip(orig_t + delta_t, 0.0, 1.0)
+            diff_t = (adv_t - orig_t) * mask_t
+
+            # Key PGD objectives:
+            # 1) align with target pattern, 2) increase perturbation magnitude,
+            # 3) raise local high-frequency to hurt OCR readability.
+            align_term = paddle.mean(diff_t * target_t)
+            magnitude_term = paddle.mean(paddle.abs(diff_t))
+
+            adv_gray = 0.114 * adv_t[:, :, 0] + 0.587 * adv_t[:, :, 1] + 0.299 * adv_t[:, :, 2]
+            gx = adv_gray[:, 1:] - adv_gray[:, :-1]
+            gy = adv_gray[1:, :] - adv_gray[:-1, :]
+            edge_term = paddle.mean(paddle.abs(gx)) + paddle.mean(paddle.abs(gy))
+
+            loss = (
+                float(self.config.pgd_align_weight) * align_term
+                + float(self.config.pgd_magnitude_weight) * magnitude_term
+                + float(self.config.pgd_edge_weight) * edge_term
+            )
+            loss.backward()
+            grad = delta_t.grad
+            if grad is None:
+                break
+
+            step = alpha * paddle.sign(grad) * mask_t
+            next_delta = paddle.clip(delta_t + step, -eps, eps)
+            next_delta = next_delta * mask_t
+
+            delta_t = next_delta.detach()
+            delta_t.stop_gradient = False
+
+        return (delta_t.numpy() * 255.0).astype(np.float32)
+
+    def _optimize_delta_advbox_roi(
+        self,
+        roi_delta: np.ndarray,
+        original_roi: np.ndarray,
+        writable_3c: np.ndarray,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        # Prefer official adversarialbox backend when available, with seamless fallback.
+        if self._advbox_backend != "none":
+            advbox_params = AdvBoxROIAttackParams(
+                epsilon=float(self.config.epsilon),
+                alpha=float(self.config.alpha),
+                steps=max(1, int(self.config.steps)),
+                epsilon_steps=max(1, int(self.config.advbox_epsilon_steps)),
+                attack_name=str(self.config.advbox_attack_name),
+                spsa_sigma=float(self.config.advbox_spsa_sigma),
+                spsa_samples=max(1, int(self.config.advbox_spsa_samples)),
+                text_change_bonus=float(self.config.advbox_text_change_bonus),
+            )
+
+            recognizer = None
+            try:
+                recognizer = self._get_advbox_recognizer()
+            except Exception:
+                recognizer = None
+
+            advbox_delta = run_advbox_roi_attack(
+                roi_delta=roi_delta,
+                original_roi=original_roi,
+                writable_3c=writable_3c,
+                params=advbox_params,
+                recognizer=recognizer,
+                rng=rng,
+            )
+            if advbox_delta is not None:
+                return advbox_delta
+            if not self._advbox_fallback_warned:
+                print("Warning: adversarialbox backend call failed, fallback to built-in advbox_roi optimizer.")
+                self._advbox_fallback_warned = True
+
+        try:
+            import paddle
+        except Exception:
+            if not self._advbox_fallback_warned:
+                print("Warning: paddle unavailable for advbox_roi, fallback to random attack pattern.")
+                self._advbox_fallback_warned = True
+            return self._optimize_delta_random(
+                roi_delta=roi_delta,
+                writable_3c=writable_3c,
+                roi_h=roi_delta.shape[0],
+                roi_w=roi_delta.shape[1],
+                rng=rng,
+            )
+
+        if int(np.count_nonzero(writable_3c)) <= 0:
+            return roi_delta
+
+        if self._advbox_backend == "none" and not self._advbox_fallback_warned:
+            print("Warning: advbox package not found; using built-in advbox_roi optimizer.")
+            self._advbox_fallback_warned = True
+
+        eps = float(self.config.epsilon) / 255.0
+        alpha = float(self.config.alpha) / 255.0
+
+        original_norm = np.clip(original_roi / 255.0, 0.0, 1.0).astype(np.float32)
+        base_delta = np.clip(roi_delta / 255.0, -eps, eps).astype(np.float32)
+        mask_np = writable_3c.astype(np.float32)
+
+        # Use a stable target texture so all restarts optimize toward the same objective.
+        pattern = self._gen_attack_pattern(roi_delta.shape[0], roi_delta.shape[1], rng)[..., None]
+        target_np = np.repeat(pattern, 3, axis=2).astype(np.float32)
+
+        orig_t = paddle.to_tensor(original_norm, stop_gradient=True)
+        mask_t = paddle.to_tensor(mask_np, stop_gradient=True)
+        target_t = paddle.to_tensor(target_np, stop_gradient=True)
+
+        restarts = max(1, int(self.config.advbox_restarts))
+        momentum = float(np.clip(self.config.advbox_momentum, 0.0, 0.99))
+
+        best_delta = base_delta.copy()
+        best_score = -1e9
+
+        for restart_idx in range(restarts):
+            if restart_idx == 0:
+                init_delta = base_delta.copy()
+            else:
+                init_delta = rng.uniform(-eps, eps, size=base_delta.shape).astype(np.float32)
+                init_delta = init_delta * mask_np
+
+            delta_t = paddle.to_tensor(init_delta)
+            delta_t.stop_gradient = False
+            velocity = paddle.zeros_like(delta_t)
+
+            for _ in range(max(1, int(self.config.steps))):
+                adv_t = paddle.clip(orig_t + delta_t, 0.0, 1.0)
+                diff_t = (adv_t - orig_t) * mask_t
+
+                align_term = paddle.mean(diff_t * target_t)
+                magnitude_term = paddle.mean(paddle.abs(diff_t))
+
+                adv_gray = 0.114 * adv_t[:, :, 0] + 0.587 * adv_t[:, :, 1] + 0.299 * adv_t[:, :, 2]
+                gx = adv_gray[:, 1:] - adv_gray[:, :-1]
+                gy = adv_gray[1:, :] - adv_gray[:-1, :]
+                edge_term = paddle.mean(paddle.abs(gx)) + paddle.mean(paddle.abs(gy))
+
+                score = (
+                    float(self.config.pgd_align_weight) * align_term
+                    + float(self.config.pgd_magnitude_weight) * magnitude_term
+                    + float(self.config.pgd_edge_weight) * edge_term
+                )
+                score.backward()
+                grad = delta_t.grad
+                if grad is None:
+                    break
+
+                velocity = momentum * velocity + paddle.sign(grad) * mask_t
+                next_delta = paddle.clip(delta_t + alpha * paddle.sign(velocity), -eps, eps)
+                next_delta = next_delta * mask_t
+
+                delta_t = next_delta.detach()
+                delta_t.stop_gradient = False
+
+            cand_delta = delta_t.numpy().astype(np.float32)
+            cand_score = self._score_surrogate_np(
+                original_norm=original_norm,
+                delta_norm=cand_delta,
+                mask_np=mask_np,
+                target_np=target_np,
+            )
+            if cand_score > best_score:
+                best_score = cand_score
+                best_delta = cand_delta
+
+        return (best_delta * 255.0).astype(np.float32)
+
+    def _score_surrogate_np(
+        self,
+        original_norm: np.ndarray,
+        delta_norm: np.ndarray,
+        mask_np: np.ndarray,
+        target_np: np.ndarray,
+    ) -> float:
+        adv_norm = np.clip(original_norm + delta_norm, 0.0, 1.0)
+        diff = (adv_norm - original_norm) * mask_np
+
+        align_term = float(np.mean(diff * target_np))
+        magnitude_term = float(np.mean(np.abs(diff)))
+
+        adv_gray = 0.114 * adv_norm[:, :, 0] + 0.587 * adv_norm[:, :, 1] + 0.299 * adv_norm[:, :, 2]
+        if adv_gray.shape[0] > 1 and adv_gray.shape[1] > 1:
+            gx = adv_gray[:, 1:] - adv_gray[:, :-1]
+            gy = adv_gray[1:, :] - adv_gray[:-1, :]
+            edge_term = float(np.mean(np.abs(gx)) + np.mean(np.abs(gy)))
+        else:
+            edge_term = 0.0
+
+        return (
+            float(self.config.pgd_align_weight) * align_term
+            + float(self.config.pgd_magnitude_weight) * magnitude_term
+            + float(self.config.pgd_edge_weight) * edge_term
+        )
 
     def _collect_sensitive_bboxes(self, cells: Sequence[Dict[str, Any]]) -> List[List[float]]:
         bboxes: List[List[float]] = []
@@ -207,6 +585,14 @@ class AdversarialPerturbator:
         self._adaptive_ocr_model = PaddleOCR(lang=self.config.adaptive_ocr_lang, use_angle_cls=True)
         return self._adaptive_ocr_model
 
+    def _get_advbox_recognizer(self):
+        if self._advbox_recognizer is not None:
+            return self._advbox_recognizer
+        from paddleocr import TextRecognition
+
+        self._advbox_recognizer = TextRecognition(model_name=self.config.advbox_rec_model)
+        return self._advbox_recognizer
+
     def _infer_sensitive_bboxes_from_cell_text(self, cells: Sequence[Dict[str, Any]]) -> List[List[float]]:
         detector = self._get_adaptive_detector()
         bboxes: List[List[float]] = []
@@ -263,6 +649,22 @@ class AdversarialPerturbator:
         y1 = max(0, min(y1, height))
         x2 = max(0, min(x2, width))
         y2 = max(0, min(y2, height))
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _expand_bbox(
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        extra: int,
+        width: int,
+        height: int,
+    ) -> Tuple[int, int, int, int]:
+        x1 = max(0, x1 - extra)
+        y1 = max(0, y1 - extra)
+        x2 = min(width, x2 + extra)
+        y2 = min(height, y2 + extra)
         return x1, y1, x2, y2
 
     def _build_line_protection_mask(self, image: np.ndarray, cells: Sequence[Dict[str, Any]]) -> np.ndarray:
@@ -429,6 +831,38 @@ def _resize_to_height(image: np.ndarray, target_h: int) -> np.ndarray:
     scale = float(target_h) / float(max(h, 1))
     target_w = max(1, int(round(w * scale)))
     return cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+
+
+def _scale_image_and_cells(
+    image: np.ndarray,
+    cells: Sequence[Dict[str, Any]],
+    scale: float,
+) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+    if abs(scale - 1.0) <= 1e-6:
+        return image, [dict(c) for c in cells if isinstance(c, dict)]
+
+    h, w = image.shape[:2]
+    target_w = max(1, int(round(w * scale)))
+    target_h = max(1, int(round(h * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    scaled_image = cv2.resize(image, (target_w, target_h), interpolation=interpolation)
+
+    scaled_cells: List[Dict[str, Any]] = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        new_cell = dict(cell)
+        bbox = new_cell.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            new_cell["bbox"] = [
+                float(bbox[0]) * scale,
+                float(bbox[1]) * scale,
+                float(bbox[2]) * scale,
+                float(bbox[3]) * scale,
+            ]
+        scaled_cells.append(new_cell)
+
+    return scaled_image, scaled_cells
 
 
 def _build_compare_canvas(

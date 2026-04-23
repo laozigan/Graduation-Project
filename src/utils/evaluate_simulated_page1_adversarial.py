@@ -169,14 +169,12 @@ def _predict_cells_by_gt_bbox(image_path: Path, gt_json: Path, output_json: Path
                 text = ""
 
         sensitives = detector.detect_all(text)
-        sensitive = detector._summarize_results(sensitives)
 
         pred_cells.append(
             {
                 "bbox": [float(v) for v in bbox[:4]],
                 "text": text,
                 "sensitives": sensitives,
-                "sensitive": sensitive,
             }
         )
 

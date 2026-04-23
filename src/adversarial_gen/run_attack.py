@@ -54,9 +54,31 @@ def main() -> None:
     parser.add_argument("--epsilon", type=float, default=24.0, help="L_inf perturbation budget")
     parser.add_argument("--alpha", type=float, default=6.0, help="Step size per iteration")
     parser.add_argument("--steps", type=int, default=9, help="Iteration count")
+    parser.add_argument(
+        "--attack-method",
+        choices=["random", "pgd", "advbox_roi"],
+        default="pgd",
+        help="Perturbation strategy: random, PGD surrogate, or advbox-style ROI optimizer",
+    )
     parser.add_argument("--seed", type=int, default=2026, help="Random seed")
     parser.add_argument("--bbox-margin", type=int, default=2, help="Skip bbox borders by N pixels")
     parser.add_argument("--line-protect-width", type=int, default=2, help="Protected border thickness")
+    parser.add_argument("--pgd-align-weight", type=float, default=1.0, help="PGD alignment objective weight")
+    parser.add_argument("--pgd-magnitude-weight", type=float, default=0.3, help="PGD magnitude objective weight")
+    parser.add_argument("--pgd-edge-weight", type=float, default=0.05, help="PGD edge objective weight")
+    parser.add_argument("--advbox-roi-expand", type=int, default=8, help="Extra pixels to expand each sensitive ROI for advbox_roi")
+    parser.add_argument("--advbox-restarts", type=int, default=3, help="Multi-restart count for advbox_roi optimization")
+    parser.add_argument("--advbox-momentum", type=float, default=0.8, help="Momentum factor for advbox_roi gradient ascent")
+    parser.add_argument("--advbox-attack-name", choices=["PGD", "FGSM", "BIM", "MIFGSM"], default="PGD", help="Attack type when adversarialbox package backend is available")
+    parser.add_argument("--advbox-epsilon-steps", type=int, default=6, help="adversarialbox epsilon schedule steps")
+    parser.add_argument("--advbox-spsa-sigma", type=float, default=2.0, help="SPSA noise scale for recognition-gradient estimation")
+    parser.add_argument("--advbox-spsa-samples", type=int, default=4, help="SPSA sample count for recognition-gradient estimation")
+    parser.add_argument("--advbox-text-change-bonus", type=float, default=0.5, help="Objective bonus when OCR text changes from original")
+    parser.add_argument("--advbox-rec-model", type=str, default="PP-OCRv5_server_rec", help="PaddleOCR recognition model name used by advbox_roi")
+    parser.add_argument("--enable-mkldnn", dest="enable_mkldnn", action="store_true", help="Enable MKLDNN acceleration for Paddle CPU ops")
+    parser.add_argument("--disable-mkldnn", dest="enable_mkldnn", action="store_false", help="Disable MKLDNN acceleration")
+    parser.add_argument("--num-threads", type=int, default=0, help="CPU threads for OpenCV/BLAS runtime, 0 keeps default")
+    parser.add_argument("--image-scale", type=float, default=1.0, help="Scale image before attack for speed (e.g. 0.9), then resize back")
     parser.add_argument(
         "--orient-mode",
         choices=["off", "upside_down", "always"],
@@ -74,7 +96,25 @@ def main() -> None:
     parser.set_defaults(auto_orient=None)
     parser.set_defaults(force_bbox_fallback=True)
     parser.set_defaults(adaptive_missing_cells=True)
+    parser.set_defaults(enable_mkldnn=False)
     args = parser.parse_args()
+
+    if args.image_scale <= 0:
+        raise ValueError("--image-scale must be > 0")
+    if args.num_threads < 0:
+        raise ValueError("--num-threads must be >= 0")
+    if args.advbox_roi_expand < 0:
+        raise ValueError("--advbox-roi-expand must be >= 0")
+    if args.advbox_restarts <= 0:
+        raise ValueError("--advbox-restarts must be > 0")
+    if args.advbox_momentum < 0 or args.advbox_momentum >= 1:
+        raise ValueError("--advbox-momentum must be in [0, 1)")
+    if args.advbox_epsilon_steps <= 0:
+        raise ValueError("--advbox-epsilon-steps must be > 0")
+    if args.advbox_spsa_sigma <= 0:
+        raise ValueError("--advbox-spsa-sigma must be > 0")
+    if args.advbox_spsa_samples <= 0:
+        raise ValueError("--advbox-spsa-samples must be > 0")
 
     page_count = _load_page_count(args.det_json)
     if page_count <= 0:
@@ -103,11 +143,27 @@ def main() -> None:
         epsilon=args.epsilon,
         alpha=args.alpha,
         steps=args.steps,
+        attack_method=args.attack_method,
         seed=args.seed,
         bbox_margin=args.bbox_margin,
         line_protect_width=args.line_protect_width,
         force_bbox_fallback=args.force_bbox_fallback,
         adaptive_detect_missing_cells=args.adaptive_missing_cells,
+        pgd_align_weight=args.pgd_align_weight,
+        pgd_magnitude_weight=args.pgd_magnitude_weight,
+        pgd_edge_weight=args.pgd_edge_weight,
+        advbox_roi_expand=args.advbox_roi_expand,
+        advbox_restarts=args.advbox_restarts,
+        advbox_momentum=args.advbox_momentum,
+        advbox_attack_name=args.advbox_attack_name,
+        advbox_epsilon_steps=args.advbox_epsilon_steps,
+        advbox_spsa_sigma=args.advbox_spsa_sigma,
+        advbox_spsa_samples=args.advbox_spsa_samples,
+        advbox_text_change_bonus=args.advbox_text_change_bonus,
+        advbox_rec_model=args.advbox_rec_model,
+        enable_mkldnn=args.enable_mkldnn,
+        num_threads=args.num_threads,
+        image_scale=args.image_scale,
     )
 
     saved = run_attack_from_files(

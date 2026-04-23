@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import cv2
 import numpy as np
 from pdf2image import convert_from_path
@@ -9,6 +10,9 @@ def get_poppler_path(default_path: Optional[str] = None) -> Optional[str]:
     """返回 Poppler 可执行文件路径，可从环境变量读取。"""
     if default_path and os.path.exists(default_path):
         return default_path
+    repo_poppler = Path(__file__).resolve().parents[2] / "poppler" / "Library" / "bin"
+    if repo_poppler.exists():
+        return str(repo_poppler)
     return os.getenv("POPPLER_PATH")
 
 
@@ -27,8 +31,9 @@ def load_images_from_file(file_path: str, dpi: int = 200, poppler_path: Optional
             raise ValueError(f"无法读取图片: {file_path}")
         return [img]
     if ext == ".pdf":
-        if poppler_path:
-            pil_imgs = convert_from_path(file_path, dpi=dpi, poppler_path=poppler_path)
+        resolved_poppler = get_poppler_path(poppler_path)
+        if resolved_poppler:
+            pil_imgs = convert_from_path(file_path, dpi=dpi, poppler_path=resolved_poppler)
         else:
             pil_imgs = convert_from_path(file_path, dpi=dpi)
         return [convert_to_opencv(pil) for pil in pil_imgs]
