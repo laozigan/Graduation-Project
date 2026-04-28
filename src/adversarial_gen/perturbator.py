@@ -530,7 +530,11 @@ class AdversarialPerturbator:
             is_sensitive = False
             sensitives = cell.get("sensitives")
             if isinstance(sensitives, list):
-                is_sensitive = any(isinstance(item, dict) and item.get("is_sensitive") for item in sensitives)
+                # Compatible with detector outputs that return only matched items
+                # (usually no explicit "is_sensitive" field).
+                is_sensitive = bool(sensitives) or any(
+                    isinstance(item, dict) and item.get("is_sensitive") for item in sensitives
+                )
 
             sensitive = cell.get("sensitive")
             if isinstance(sensitive, dict) and sensitive.get("is_sensitive"):
@@ -582,7 +586,7 @@ class AdversarialPerturbator:
             return self._adaptive_ocr_model
         from paddleocr import PaddleOCR
 
-        self._adaptive_ocr_model = PaddleOCR(lang=self.config.adaptive_ocr_lang, use_angle_cls=True)
+        self._adaptive_ocr_model = PaddleOCR(lang=self.config.adaptive_ocr_lang, use_textline_orientation=True)
         return self._adaptive_ocr_model
 
     def _get_advbox_recognizer(self):

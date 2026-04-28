@@ -157,24 +157,62 @@ def cluster_text_boxes(ocr_results: List[Dict], vertical_threshold: int = 15, ho
     return cells
 
 
+def _resize_image_for_ocr(img: np.ndarray, scale: float) -> np.ndarray:
+    if abs(scale - 1.0) < 1e-6:
+        return img
+    h, w = img.shape[:2]
+    new_w = max(32, int(round(w * scale)))
+    new_h = max(32, int(round(h * scale)))
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
 def run_ocr_on_image(img: np.ndarray,
                       ocr_model,
                       use_textline_orientation: bool = False,
                       **predict_kwargs):
-    """Run OCR on a single image using PaddleOCR predict or ocr API."""
-    if hasattr(ocr_model, 'predict'):
+    """Run OCR on a single image and return (result, applied_scale)."""
+    if not hasattr(ocr_model, 'predict') and not hasattr(ocr_model, 'ocr'):
+        raise AttributeError("OCR model does not support predict or ocr methods")
+
+    scales = [1.0, 0.75, 0.5]
+    last_error = None
+    for scale in scales:
+        ocr_img = _resize_image_for_ocr(img, scale)
         try:
-            return ocr_model.predict(
-                img,
-                use_textline_orientation=use_textline_orientation,
-                **predict_kwargs,
-            )
-        except TypeError:
-            # Some PaddleOCR versions accept a single img argument only
-            return ocr_model.predict(img, **predict_kwargs)
-    if hasattr(ocr_model, 'ocr'):
-        return ocr_model.ocr(img)
-    raise AttributeError("OCR model does not support predict or ocr methods")
+            if hasattr(ocr_model, 'ocr'):
+                result = ocr_model.ocr(ocr_img)
+            else:
+                try:
+                    result = ocr_model.predict(
+                        ocr_img,
+                        use_textline_orientation=use_textline_orientation,
+                        **predict_kwargs,
+                    )
+                except TypeError:
+                    # Some PaddleOCR versions accept a single img argument only
+                    result = ocr_model.predict(ocr_img, **predict_kwargs)
+            return result, scale
+        except Exception as exc:
+            last_error = exc
+            if hasattr(ocr_model, 'predict') and hasattr(ocr_model, 'ocr'):
+                try:
+                    result = ocr_model.predict(
+                        ocr_img,
+                        use_textline_orientation=use_textline_orientation,
+                        **predict_kwargs,
+                    )
+                    return result, scale
+                except TypeError:
+                    try:
+                        result = ocr_model.predict(ocr_img, **predict_kwargs)
+                        return result, scale
+                    except Exception as predict_exc:
+                        last_error = predict_exc
+            if scale < 1.0:
+                print(f"Warning: OCR failed at scale={scale:.2f}, retrying smaller scale. Detail: {exc}")
+            continue
+
+    raise RuntimeError(f"OCR failed for all fallback scales. Last error: {last_error}")
 
 
 def extract_cells_from_image(img: np.ndarray,
@@ -184,7 +222,7 @@ def extract_cells_from_image(img: np.ndarray,
                              ocr_predict_kwargs: Optional[Dict] = None) -> List[Dict]:
     """对单张图像进行 OCR 并提取聚类后的单元格。"""
     ocr_predict_kwargs = ocr_predict_kwargs or {}
-    result = run_ocr_on_image(
+    result, applied_scale = run_ocr_on_image(
         img,
         ocr_model,
         use_textline_orientation=ocr_predict_kwargs.pop('use_textline_orientation', False),
@@ -194,6 +232,12 @@ def extract_cells_from_image(img: np.ndarray,
         return []
     ocr_result = result[0] if isinstance(result, (list, tuple)) else result
     raw_boxes = convert_ocr_result_to_boxes(ocr_result)
+    if applied_scale < 1.0 and raw_boxes:
+        inv_scale = 1.0 / applied_scale
+        for box in raw_boxes:
+            bbox = box.get("bbox")
+            if isinstance(bbox, list) and len(bbox) >= 4:
+                box["bbox"] = [float(v) * inv_scale for v in bbox[:4]]
     return cluster_text_boxes(raw_boxes, vertical_threshold, horizontal_threshold)
 
 

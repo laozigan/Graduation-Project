@@ -251,7 +251,13 @@ def process_document(file_path: str,
 
         # 1. 表格单元格提取
         print("开始表格单元格提取...")
-        cells = extractor.extract_from_image(img)
+        try:
+            cells = extractor.extract_from_image(img)
+        except RuntimeError as exc:
+            # PaddleOCR/PaddleX may fail on some PDF pages with a native "Unknown exception".
+            # Keep the pipeline alive for remaining pages and downstream visualization/output.
+            print(f"Warning: OCR failed on page {page_idx+1}, fallback to empty cells. Detail: {exc}")
+            cells = []
         print(f"提取到 {len(cells)} 个候选单元格")
 
         if structure_engine is not None:
