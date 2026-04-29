@@ -1,5 +1,4 @@
 virtual_env/**
-data/**
 .idea/**
 __pychache__/**
 *.pyc
