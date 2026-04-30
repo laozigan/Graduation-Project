@@ -166,6 +166,25 @@ def _resize_image_for_ocr(img: np.ndarray, scale: float) -> np.ndarray:
     return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
+def _build_ocr_scales(img: np.ndarray, fallback_scales: List[float], max_long_edge: int = 1200) -> List[float]:
+    h, w = img.shape[:2]
+    long_edge = max(h, w)
+    scales = []
+
+    if long_edge > max_long_edge:
+        scales.append(max_long_edge / float(long_edge))
+
+    scales.extend(fallback_scales)
+
+    unique_scales = []
+    for scale in scales:
+        if scale <= 0:
+            continue
+        if not any(abs(scale - existing) < 1e-6 for existing in unique_scales):
+            unique_scales.append(scale)
+    return unique_scales
+
+
 def run_ocr_on_image(img: np.ndarray,
                       ocr_model,
                       use_textline_orientation: bool = False,
@@ -174,7 +193,7 @@ def run_ocr_on_image(img: np.ndarray,
     if not hasattr(ocr_model, 'predict') and not hasattr(ocr_model, 'ocr'):
         raise AttributeError("OCR model does not support predict or ocr methods")
 
-    scales = [1.0, 0.75, 0.5]
+    scales = _build_ocr_scales(img, [1.0, 0.75, 0.5], max_long_edge=1200)
     last_error = None
     for scale in scales:
         ocr_img = _resize_image_for_ocr(img, scale)

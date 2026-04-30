@@ -300,16 +300,22 @@ def run_end_to_end(
             advbox_rec_model=advbox_rec_model,
         )
 
-        saved = run_attack_from_files(
-            input_file=input_path,
-            detection_json=det_json_path,
-            output_paths=adv_paths,
-            config=cfg,
-            dpi=int(dpi),
-            orient_mode="off",
-            verbose=True,
-            compare_output_paths=compare_paths,
-        )
+        saved: List[str] = []
+        attack_error: Optional[str] = None
+        try:
+            saved = run_attack_from_files(
+                input_file=input_path,
+                detection_json=det_json_path,
+                output_paths=adv_paths,
+                config=cfg,
+                dpi=int(dpi),
+                orient_mode="off",
+                verbose=True,
+                compare_output_paths=compare_paths,
+            )
+        except Exception as exc:
+            attack_error = str(exc)
+            print(f"Warning: adversarial generation failed, keep detection outputs only. Detail: {exc}")
 
         gallery = [path for path in compare_paths if os.path.exists(path)]
         if not gallery:
@@ -317,6 +323,8 @@ def run_end_to_end(
 
         downloadable_files = [path for path in saved if os.path.exists(path)]
         status_prefix = "处理完成。"
+        if attack_error:
+            status_prefix = f"检测已完成，但对抗样本生成失败：{attack_error}。"
         status = (
             f"{status_prefix}页数={stats['pages']}，文本块={stats['cells']}，"
             f"敏感文本块={stats['sensitive_cells']}，命中项={stats['matches']}，"
