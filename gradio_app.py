@@ -97,10 +97,6 @@ def _build_output_paths(output: str, page_count: int) -> List[str]:
     return [f"{stem}_p{index + 1}{ext}" for index in range(page_count)]
 
 
-def _is_pdf_path(file_path: str) -> bool:
-    return Path(file_path).suffix.lower() == ".pdf"
-
-
 def _build_empty_detection_pages(page_count: int) -> List[Dict[str, Any]]:
     return [{"page": idx, "cells": []} for idx in range(page_count)]
 
@@ -321,8 +317,6 @@ def run_end_to_end(
 
         downloadable_files = [path for path in saved if os.path.exists(path)]
         status_prefix = "处理完成。"
-        if _is_pdf_path(input_path):
-            status_prefix = "处理完成（PDF 安全模式：跳过 OCR 检测）。"
         status = (
             f"{status_prefix}页数={stats['pages']}，文本块={stats['cells']}，"
             f"敏感文本块={stats['sensitive_cells']}，命中项={stats['matches']}，"
@@ -336,14 +330,14 @@ def run_end_to_end(
 
 
 def build_demo() -> gr.Blocks:
-    with gr.Blocks(title="隐私保护前端") as demo:
+    with gr.Blocks(title="基于对抗样本的表格图像隐私保护系统") as demo:
         gr.Markdown(
-            "# 隐私保护前端\n"
-            "上传一张图片或 PDF，一键完成端到端流程：敏感信息检测 + 对抗样本生成。"
+            "# 基于对抗样本的表格图像隐私保护系统\n"
+            "上传一张图片或 PDF，完成端到端处理：图像预处理 -> 表格结构提取 -> 敏感信息检测 -> 对抗样本生成。"
         )
 
         with gr.Tab("一键处理流程"):
-            input_file = gr.File(label="输入文档（图片/PDF）", type="filepath")
+            input_file = gr.File(label="上传文件（图片/PDF）", type="filepath")
 
             with gr.Row():
                 lang = gr.Dropdown(choices=["ch", "en"], value="ch", label="OCR 语言")
