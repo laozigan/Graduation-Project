@@ -68,13 +68,14 @@ def _run_pipeline(args: argparse.Namespace) -> None:
         f"MKLDNN: {'enabled' if processor_module.ENABLE_MKLDNN else 'disabled'} "
         "(set PPS_ENABLE_MKLDNN=1 to enable)"
     )
-    ocr = processor_module.PaddleOCR(lang=args.lang, use_textline_orientation=True)
+    use_gpu = processor_module.resolve_use_gpu()
+    ocr = processor_module.PaddleOCR(lang=args.lang, use_textline_orientation=True, use_gpu=use_gpu)
     detector = SensitiveDetector(
         use_nlp=args.use_nlp,
         enable_uie=args.use_uie,
         uie_model=args.uie_model,
     )
-    structure_engine = processor_module._build_structure_engine(args.lang) if args.use_ppstructure else None
+    structure_engine = processor_module._build_structure_engine(args.lang, use_gpu=use_gpu) if args.use_ppstructure else None
 
     pipeline_input = processor_module._maybe_preprocess_input(args.input, args.lang, ocr_model=ocr)
 

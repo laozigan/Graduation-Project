@@ -111,13 +111,14 @@ def _get_runtime(
     key = (lang, use_nlp, use_uie, uie_model, use_ppstructure)
     if _RUNTIME_CACHE.get("key") != key:
         print("Initializing OCR and sensitive detector...")
-        ocr = processor_module.PaddleOCR(lang=lang, use_textline_orientation=True)
+        use_gpu = processor_module.resolve_use_gpu()
+        ocr = processor_module.PaddleOCR(lang=lang, use_textline_orientation=True, use_gpu=use_gpu)
         detector = SensitiveDetector(
             use_nlp=use_nlp,
             enable_uie=use_uie,
             uie_model=uie_model,
         )
-        structure_engine = processor_module._build_structure_engine(lang) if use_ppstructure else None
+        structure_engine = processor_module._build_structure_engine(lang, use_gpu=use_gpu) if use_ppstructure else None
 
         _RUNTIME_CACHE["key"] = key
         _RUNTIME_CACHE["ocr"] = ocr

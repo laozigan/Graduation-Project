@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from paddleocr import PaddleOCR
+from src.utils.paddle_runtime import resolve_paddle_use_gpu
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {
@@ -143,7 +144,8 @@ class ImagePreprocessor:
         if not self.config.use_ocr_orientation or PaddleOCR is None:
             return None
         if self._ocr_model is None:
-            self._ocr_model = PaddleOCR(lang=self.config.lang, use_textline_orientation=True)
+            use_gpu, _ = resolve_paddle_use_gpu()
+            self._ocr_model = PaddleOCR(lang=self.config.lang, use_textline_orientation=True, use_gpu=use_gpu)
         return self._ocr_model
 
     @staticmethod

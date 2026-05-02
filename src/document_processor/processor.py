@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from src.sensitive_detection import SensitiveDetector
 from src.table_extraction import TableExtractor, load_images_from_file
 from src.image_preprocessing import ImagePreprocessor, PreprocessConfig, SUPPORTED_IMAGE_EXTENSIONS
+from src.utils.paddle_runtime import resolve_paddle_use_gpu
 
 # 检查poppler路径是否存在
 poppler_path = "D:/PrivacyProtectionSystem/poppler/Library/bin"
@@ -91,7 +92,14 @@ def _maybe_preprocess_input(file_path: str, lang: str, ocr_model: Optional[Paddl
     return result.output_path
 
 
-def _build_structure_engine(lang: str):
+def resolve_use_gpu(prefer_gpu: Optional[bool] = None, announce: bool = True) -> bool:
+    use_gpu, message = resolve_paddle_use_gpu(prefer_gpu=prefer_gpu)
+    if announce:
+        print(message)
+    return use_gpu
+
+
+def _build_structure_engine(lang: str, use_gpu: bool = False):
     """Build PPStructure engine if available; return None on failure."""
     if PPStructure is None and PPStructureV3 is None:
         print("Warning: PPStructure is unavailable. Continue with OCR clustering only.")
@@ -99,6 +107,14 @@ def _build_structure_engine(lang: str):
 
     if PPStructureV3 is not None:
         try:
+            return PPStructureV3(
+                lang=lang,
+                use_gpu=use_gpu,
+                use_chart_recognition=False,
+                use_formula_recognition=False,
+                use_seal_recognition=False,
+            )
+        except TypeError:
             return PPStructureV3(
                 lang=lang,
                 use_chart_recognition=False,
@@ -112,7 +128,7 @@ def _build_structure_engine(lang: str):
         print("Warning: Legacy PPStructure is unavailable. Continue with OCR clustering only.")
         return None
     try:
-        return PPStructure(show_log=False, lang=lang, ocr=True, layout=True, table=True)
+        return PPStructure(show_log=False, lang=lang, ocr=True, layout=True, table=True, use_gpu=use_gpu)
     except TypeError:
         # Compatibility fallback for older constructor signatures.
         return PPStructure(lang=lang)
@@ -341,13 +357,14 @@ def main():
     # 初始化 OCR（CPU模式）
     print("初始化 PaddleOCR...")
     print(f"MKLDNN: {'enabled' if ENABLE_MKLDNN else 'disabled'} (set PPS_ENABLE_MKLDNN=1 to enable)")
-    ocr = PaddleOCR(lang=args.lang, use_angle_cls=True)
+    use_gpu = resolve_use_gpu()
+    ocr = PaddleOCR(lang=args.lang, use_angle_cls=True, use_gpu=use_gpu)
     detector = SensitiveDetector(
         use_nlp=args.use_nlp,
         enable_uie=args.use_uie,
         uie_model=args.uie_model,
     )
-    structure_engine = _build_structure_engine(args.lang) if args.use_ppstructure else None
+    structure_engine = _build_structure_engine(args.lang, use_gpu=use_gpu) if args.use_ppstructure else None
 
     # 若输入是图片，先进行图像预处理，再进入后续主流程
     pipeline_input = _maybe_preprocess_input(args.input, args.lang, ocr_model=ocr)

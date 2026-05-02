@@ -21,6 +21,7 @@ import numpy as np
 from .advbox_generator import AdvBoxROIAttackParams, run_advbox_roi_attack
 from src.image_preprocessing import ImagePreprocessor, PreprocessConfig
 from src.table_extraction import convert_ocr_result_to_boxes, load_images_from_file
+from src.utils.paddle_runtime import resolve_paddle_use_gpu
 
 
 @dataclass
@@ -586,7 +587,12 @@ class AdversarialPerturbator:
             return self._adaptive_ocr_model
         from paddleocr import PaddleOCR
 
-        self._adaptive_ocr_model = PaddleOCR(lang=self.config.adaptive_ocr_lang, use_textline_orientation=True)
+        use_gpu, _ = resolve_paddle_use_gpu()
+        self._adaptive_ocr_model = PaddleOCR(
+            lang=self.config.adaptive_ocr_lang,
+            use_textline_orientation=True,
+            use_gpu=use_gpu,
+        )
         return self._adaptive_ocr_model
 
     def _get_advbox_recognizer(self):
