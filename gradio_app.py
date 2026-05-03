@@ -17,6 +17,7 @@ from src.adversarial_gen.perturbator import AttackConfig, run_attack_from_files
 from src.document_processor import processor as processor_module
 from src.sensitive_detection import SensitiveDetector
 from src.table_extraction import load_images_from_file
+from src.utils.adversarial_evaluation import AdversarialEvaluator
 
 
 _RUNTIME_CACHE: Dict[str, Any] = {
@@ -112,7 +113,11 @@ def _get_runtime(
     if _RUNTIME_CACHE.get("key") != key:
         print("Initializing OCR and sensitive detector...")
         use_gpu = processor_module.resolve_use_gpu()
-        ocr = processor_module.PaddleOCR(lang=lang, use_textline_orientation=True, use_gpu=use_gpu)
+        try:
+            ocr = processor_module.PaddleOCR(lang=lang, use_textline_orientation=True, use_gpu=use_gpu)
+        except Exception:
+            # PaddleOCR version in this environment may not accept `use_gpu` kwarg.
+            ocr = processor_module.PaddleOCR(lang=lang, use_textline_orientation=True)
         detector = SensitiveDetector(
             use_nlp=use_nlp,
             enable_uie=use_uie,
@@ -323,6 +328,107 @@ def run_end_to_end(
             gallery = [path for path in saved if os.path.exists(path)]
 
         downloadable_files = [path for path in saved if os.path.exists(path)]
+
+        # 评估对抗样本（若有生成结果）
+        eval_report = None
+        if downloadable_files and pages:
+            try:
+                import cv2 as _cv2
+                import numpy as _np
+                from src.table_extraction import TableExtractor as _TableExtractor
+
+                imgs = load_images_from_file(input_path, dpi=int(dpi), poppler_path=getattr(processor_module, "poppler_path", None))
+                extractor = _TableExtractor(ocr, poppler_path=getattr(processor_module, "poppler_path", None))
+
+                per_page = []
+                detect_comparisons = []
+                for idx, adv_path in enumerate(downloadable_files):
+                    try:
+                        adv_img = _cv2.imread(adv_path)
+                        orig_img = imgs[idx] if idx < len(imgs) else None
+                        orig_cells = pages[idx].get("cells", []) if idx < len(pages) else []
+                        adv_cells = extractor.extract_from_image(adv_img) if adv_img is not None else []
+                        metrics = AdversarialEvaluator.evaluate_page(orig_img, adv_img, orig_cells, adv_cells)
+                        per_page.append(metrics)
+                        # compute detection comparison: run sensitive detector on adv_cells
+                        adv_cells_with_sens = []
+                        for a in adv_cells:
+                            text = a.get('text', '')
+                            sens = detector.detect_all(text)
+                            new = dict(a)
+                            new['sensitives'] = sens
+                            adv_cells_with_sens.append(new)
+                        detect_comp = AdversarialEvaluator.detection_consistency(orig_cells, adv_cells_with_sens)
+                        detect_comparisons.append(detect_comp)
+                    except Exception as e:
+                        per_page.append({"error": str(e)})
+                        detect_comparisons.append({"error": str(e)})
+
+                # 汇总数值型指标
+                agg = {}
+                if per_page:
+                    numeric_keys = [k for k, v in per_page[0].items() if isinstance(v, (int, float))]
+                    for k in numeric_keys:
+                        vals = [p[k] for p in per_page if isinstance(p.get(k), (int, float))]
+                        agg[k] = float(_np.mean(vals)) if vals else None
+
+                eval_report = {"per_page": per_page, "aggregate": agg}
+                # 构建表格行: [页码, PSNR, SSIM, 敏感CER, 表格完整度]
+                eval_table_rows = []
+                detection_comparison_rows = []
+                for i, p in enumerate(per_page):
+                    if isinstance(p, dict) and p.get("error"):
+                        eval_table_rows.append([i + 1, None, None, None, None])
+                        detection_comparison_rows.append([i + 1] + [None] * 9)
+                    else:
+                        eval_table_rows.append([
+                            i + 1,
+                            p.get("psnr"),
+                            p.get("ssim"),
+                            p.get("sensitive_cer"),
+                            p.get("table_integrity_iou"),
+                        ])
+                        # detection comparison
+                        dc = detect_comparisons[i] if i < len(detect_comparisons) else None
+                        if isinstance(dc, dict) and dc.get("post"):
+                            pre = dc.get("pre", {})
+                            post = dc.get("post", {})
+                            delta = dc.get("delta", {})
+                            detection_comparison_rows.append([
+                                i + 1,
+                                pre.get("precision"),
+                                post.get("precision"),
+                                delta.get("precision"),
+                                pre.get("recall"),
+                                post.get("recall"),
+                                delta.get("recall"),
+                                pre.get("f1"),
+                                post.get("f1"),
+                                delta.get("f1"),
+                            ])
+                        else:
+                            detection_comparison_rows.append([i + 1] + [None] * 9)
+                # 构建表格行: [页码, PSNR, SSIM, 敏感CER, 表格完整度]
+                eval_table_rows = []
+                for i, p in enumerate(per_page):
+                    if isinstance(p, dict) and p.get("error"):
+                        eval_table_rows.append([i + 1, None, None, None, None])
+                    else:
+                        eval_table_rows.append([
+                            i + 1,
+                            p.get("psnr"),
+                            p.get("ssim"),
+                            p.get("sensitive_cer"),
+                            p.get("table_integrity_iou"),
+                        ])
+            except Exception as exc:
+                eval_report = {"error": str(exc)}
+                eval_table_rows = []
+            else:
+                eval_report = {"note": "no adversarial files generated to evaluate"}
+                eval_table_rows = []
+                detection_comparison_rows = []
+
         status_prefix = "处理完成。"
         if attack_error:
             status_prefix = f"检测已完成，但对抗样本生成失败：{attack_error}。"
@@ -332,8 +438,79 @@ def run_end_to_end(
             f"对抗样本文件数={len(downloadable_files)}"
         )
 
-        viz_output = viz_path if os.path.exists(viz_path) else None
-        return status, viz_output, rows, det_json_path, gallery, downloadable_files
+        # 构建前端展示的汇总 HTML（格式化并高亮 delta）
+        def fmt(val, ndigits=4):
+            try:
+                if val is None:
+                    return "-"
+                if isinstance(val, float):
+                    return f"{val:.{ndigits}f}"
+                return str(val)
+            except Exception:
+                return str(val)
+
+        if isinstance(eval_report, dict) and eval_report.get("aggregate"):
+            agg = eval_report.get("aggregate", {})
+            psnr = agg.get("psnr")
+            ssim_v = agg.get("ssim")
+            cer = agg.get("sensitive_cer")
+            table_iou = agg.get("table_integrity_iou")
+        else:
+            psnr = ssim_v = cer = table_iou = None
+
+        # 从 detection_comparison_rows 计算整体的 post 与 delta 的平均值
+        def avg_of_column(rows, idx):
+            vals = [r[idx] for r in rows if isinstance(r, list) and r[idx] is not None]
+            return float(_np.mean(vals)) if vals else None
+
+        det_rows = detection_comparison_rows if 'detection_comparison_rows' in locals() else []
+        post_prec = avg_of_column(det_rows, 2)
+        delta_prec = avg_of_column(det_rows, 3)
+        post_rec = avg_of_column(det_rows, 5)
+        delta_rec = avg_of_column(det_rows, 6)
+        post_f1 = avg_of_column(det_rows, 8)
+        delta_f1 = avg_of_column(det_rows, 9)
+
+        def color_span(value):
+            if value is None:
+                return "-"
+            try:
+                v = float(value)
+            except Exception:
+                return str(value)
+            color = "black"
+            if v < 0:
+                color = "red"
+            elif v > 0:
+                color = "green"
+            return f"<span style=\"color:{color};font-weight:600\">{v:+.4f}</span>"
+
+        html = []
+        html.append("<div style='font-family:Arial, Helvetica, sans-serif'>")
+        html.append("<h3>视觉与保真度（聚合）</h3>")
+        html.append("<table style='border-collapse:collapse'>")
+        html.append("<tr><td style='padding:6px'>PSNR</td><td style='padding:6px'>%s</td></tr>" % fmt(psnr, 2))
+        html.append("<tr><td style='padding:6px'>SSIM</td><td style='padding:6px'>%s</td></tr>" % fmt(ssim_v, 4))
+        html.append("<tr><td style='padding:6px'>敏感文本 CER</td><td style='padding:6px'>%s</td></tr>" % fmt(cer, 4))
+        html.append("<tr><td style='padding:6px'>表格完整度 (IoU)</td><td style='padding:6px'>%s</td></tr>" % fmt(table_iou, 4))
+        html.append("</table>")
+
+        html.append("<h3>识别效果对比（整体）</h3>")
+        html.append("<table style='border-collapse:collapse'>")
+        html.append("<tr><th style='padding:6px;text-align:left'>指标</th><th style='padding:6px'>Pre</th><th style='padding:6px'>Post</th><th style='padding:6px'>Delta</th></tr>")
+        # Precision
+        html.append("<tr><td style='padding:6px'>Precision</td><td style='padding:6px'>%s</td><td style='padding:6px'>%s</td><td style='padding:6px'>%s</td></tr>" % (fmt(1.0,4), fmt(post_prec,4), color_span(delta_prec)))
+        html.append("<tr><td style='padding:6px'>Recall</td><td style='padding:6px'>%s</td><td style='padding:6px'>%s</td><td style='padding:6px'>%s</td></tr>" % (fmt(1.0,4), fmt(post_rec,4), color_span(delta_rec)))
+        html.append("<tr><td style='padding:6px'>F1</td><td style='padding:6px'>%s</td><td style='padding:6px'>%s</td><td style='padding:6px'>%s</td></tr>" % (fmt(1.0,4), fmt(post_f1,4), color_span(delta_f1)))
+        html.append("</table>")
+
+        if isinstance(eval_report, dict) and eval_report.get("note"):
+            html.append("<p style='color:gray'>%s</p>" % eval_report.get("note"))
+
+        html.append("</div>")
+        evaluation_html = "\n".join(html)
+
+        return status, det_json_path, gallery, downloadable_files, evaluation_html, eval_report
     except Exception as exc:
         return f"流程执行失败：{exc}", None, [], None, [], []
 
@@ -403,17 +580,11 @@ def build_demo() -> gr.Blocks:
             run_pipeline_btn = gr.Button("运行端到端流程", variant="primary")
 
             pipeline_status = gr.Textbox(label="运行状态", interactive=False)
-            detection_viz = gr.Image(label="检测可视化（第一页）", type="filepath")
-            detection_table = gr.Dataframe(
-                headers=["页码", "文本块", "类型", "文本", "命中数"],
-                datatype=["number", "number", "str", "str", "number"],
-                row_count=(0, "dynamic"),
-                col_count=(5, "fixed"),
-                label="敏感文本块汇总",
-            )
             detection_json_file = gr.File(label="检测结果 JSON")
             attack_gallery = gr.Gallery(label="预览图", show_label=True, columns=2, height=360)
             attack_files = gr.Files(label="对抗样本输出文件")
+            evaluation_summary = gr.HTML(label="评估汇总")
+            evaluation_report = gr.JSON(label="评估结果")
 
             run_pipeline_btn.click(
                 fn=run_end_to_end,
@@ -452,11 +623,11 @@ def build_demo() -> gr.Blocks:
                 ],
                 outputs=[
                     pipeline_status,
-                    detection_viz,
-                    detection_table,
                     detection_json_file,
                     attack_gallery,
                     attack_files,
+                    evaluation_summary,
+                    evaluation_report,
                 ],
             )
 

@@ -588,11 +588,18 @@ class AdversarialPerturbator:
         from paddleocr import PaddleOCR
 
         use_gpu, _ = resolve_paddle_use_gpu()
-        self._adaptive_ocr_model = PaddleOCR(
-            lang=self.config.adaptive_ocr_lang,
-            use_textline_orientation=True,
-            use_gpu=use_gpu,
-        )
+        try:
+            self._adaptive_ocr_model = PaddleOCR(
+                lang=self.config.adaptive_ocr_lang,
+                use_textline_orientation=True,
+                use_gpu=use_gpu,
+            )
+        except Exception:
+            # Older PaddleOCR versions may not accept `use_gpu` kwarg.
+            self._adaptive_ocr_model = PaddleOCR(
+                lang=self.config.adaptive_ocr_lang,
+                use_textline_orientation=True,
+            )
         return self._adaptive_ocr_model
 
     def _get_advbox_recognizer(self):

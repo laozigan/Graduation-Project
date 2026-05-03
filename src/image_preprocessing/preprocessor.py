@@ -145,7 +145,10 @@ class ImagePreprocessor:
             return None
         if self._ocr_model is None:
             use_gpu, _ = resolve_paddle_use_gpu()
-            self._ocr_model = PaddleOCR(lang=self.config.lang, use_textline_orientation=True, use_gpu=use_gpu)
+            try:
+                self._ocr_model = PaddleOCR(lang=self.config.lang, use_textline_orientation=True, use_gpu=use_gpu)
+            except Exception:
+                self._ocr_model = PaddleOCR(lang=self.config.lang, use_textline_orientation=True)
         return self._ocr_model
 
     @staticmethod
