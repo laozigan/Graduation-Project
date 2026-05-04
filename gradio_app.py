@@ -256,7 +256,11 @@ def run_end_to_end(
             use_ppstructure=use_ppstructure,
         )
 
-        pipeline_input = processor_module._maybe_preprocess_input(input_path, lang, ocr_model=ocr)
+        # 默认不走预处理模块，直接使用原始输入路径
+        pipeline_input = input_path
+        # 若需要显式开启预处理，可以后续在 UI 增加开关。目前改为默认直接处理。
+        # pipeline_input = processor_module._maybe_preprocess_input(input_path, lang, ocr_model=ocr)
+
         pages = processor_module.process_document(
             pipeline_input,
             ocr,
@@ -331,21 +335,37 @@ def run_end_to_end(
 
         # 评估对抗样本（若有生成结果）
         eval_report = None
+        eval_table_rows = []
+        detection_comparison_rows = []
+        
+        status_prefix = "处理完成。"
+        if attack_error:
+            status_prefix = f"检测已完成，但对抗样本生成失败：{attack_error}。"
+
         if downloadable_files and pages:
             try:
                 import cv2 as _cv2
                 import numpy as _np
                 from src.table_extraction import TableExtractor as _TableExtractor
 
-                imgs = load_images_from_file(input_path, dpi=int(dpi), poppler_path=getattr(processor_module, "poppler_path", None))
-                extractor = _TableExtractor(ocr, poppler_path=getattr(processor_module, "poppler_path", None))
+                current_poppler = getattr(processor_module, "poppler_path", None)
+                imgs = load_images_from_file(input_path, dpi=int(dpi), poppler_path=current_poppler)
+                extractor = _TableExtractor(ocr, poppler_path=current_poppler)
 
                 per_page = []
                 detect_comparisons = []
                 for idx, adv_path in enumerate(downloadable_files):
                     try:
                         adv_img = _cv2.imread(adv_path)
+                        if adv_img is None:
+                            raise ValueError(f"Failed to read adversarial image: {adv_path}")
+                        
                         orig_img = imgs[idx] if idx < len(imgs) else None
+                        if orig_img is None:
+                            # If for some reason we have more adv files than original images
+                            # it might be a multi-page mismatch, try to skip
+                            continue
+                            
                         orig_cells = pages[idx].get("cells", []) if idx < len(pages) else []
                         adv_cells = extractor.extract_from_image(adv_img) if adv_img is not None else []
                         metrics = AdversarialEvaluator.evaluate_page(orig_img, adv_img, orig_cells, adv_cells)
@@ -361,6 +381,7 @@ def run_end_to_end(
                         detect_comp = AdversarialEvaluator.detection_consistency(orig_cells, adv_cells_with_sens)
                         detect_comparisons.append(detect_comp)
                     except Exception as e:
+                        print(f"Error evaluating page {idx}: {e}")
                         per_page.append({"error": str(e)})
                         detect_comparisons.append({"error": str(e)})
 
@@ -373,9 +394,7 @@ def run_end_to_end(
                         agg[k] = float(_np.mean(vals)) if vals else None
 
                 eval_report = {"per_page": per_page, "aggregate": agg}
-                # 构建表格行: [页码, PSNR, SSIM, 敏感CER, 表格完整度]
-                eval_table_rows = []
-                detection_comparison_rows = []
+                # 构建表格行
                 for i, p in enumerate(per_page):
                     if isinstance(p, dict) and p.get("error"):
                         eval_table_rows.append([i + 1, None, None, None, None])
@@ -408,30 +427,14 @@ def run_end_to_end(
                             ])
                         else:
                             detection_comparison_rows.append([i + 1] + [None] * 9)
-                # 构建表格行: [页码, PSNR, SSIM, 敏感CER, 表格完整度]
-                eval_table_rows = []
-                for i, p in enumerate(per_page):
-                    if isinstance(p, dict) and p.get("error"):
-                        eval_table_rows.append([i + 1, None, None, None, None])
-                    else:
-                        eval_table_rows.append([
-                            i + 1,
-                            p.get("psnr"),
-                            p.get("ssim"),
-                            p.get("sensitive_cer"),
-                            p.get("table_integrity_iou"),
-                        ])
             except Exception as exc:
+                print(f"Global evaluation error: {exc}")
                 eval_report = {"error": str(exc)}
-                eval_table_rows = []
-            else:
-                eval_report = {"note": "no adversarial files generated to evaluate"}
-                eval_table_rows = []
-                detection_comparison_rows = []
+        else:
+            if not pages:
+                status_prefix = "检测完成，由于页面文本识别结果为空，跳过后续对抗生成与评估环节。"
+            eval_report = {"note": "no adversarial files generated to evaluate"}
 
-        status_prefix = "处理完成。"
-        if attack_error:
-            status_prefix = f"检测已完成，但对抗样本生成失败：{attack_error}。"
         status = (
             f"{status_prefix}页数={stats['pages']}，文本块={stats['cells']}，"
             f"敏感文本块={stats['sensitive_cells']}，命中项={stats['matches']}，"
@@ -513,6 +516,62 @@ def run_end_to_end(
         return status, det_json_path, gallery, downloadable_files, evaluation_html, eval_report
     except Exception as exc:
         return f"流程执行失败：{exc}", None, [], None, [], []
+
+
+def run_standalone_detection(
+    upload_file: Any,
+    lang: str,
+    use_nlp: bool,
+    use_uie: bool,
+    uie_model: str,
+):
+    """独立的敏感信息识别测试函数"""
+    input_path = _resolve_file_path(upload_file)
+    if not input_path:
+        return "请先上传图片。", None, [], ""
+
+    try:
+        _ensure_dirs()
+        stamp = _timestamp()
+        stem = _safe_stem(input_path)
+        viz_path = str(Path("outputs/ocr_result") / f"{stem}_{stamp}_test_viz.jpg")
+
+        ocr, detector, _ = _get_runtime(
+            lang=lang,
+            use_nlp=use_nlp,
+            use_uie=use_uie,
+            uie_model=uie_model,
+            use_ppstructure=False,
+        )
+
+        # 独立的敏感信息识别测试默认也不走预处理
+        pipeline_input = input_path
+        # pipeline_input = processor_module._maybe_preprocess_input(input_path, lang, ocr_model=ocr)
+
+        pages = processor_module.process_document(
+            pipeline_input,
+            ocr,
+            detector,
+            output_viz=viz_path,
+            dpi=200,
+            structure_engine=None,
+        )
+
+        rows, stats = _summarize_detection_pages(pages)
+        
+        status = f"检测完成。识别到 {stats['cells']} 个文本块，其中 {stats['sensitive_cells']} 个包含敏感信息。"
+        
+        # 构建简单的结果摘要 HTML
+        html = ["<div style='font-family:sans-serif'>"]
+        if stats['sensitive_cells'] > 0:
+            html.append(f"<p style='color:red;font-weight:bold'>警告：检测到 {stats['sensitive_cells']} 处敏感信息泄露！</p>")
+        else:
+            html.append("<p style='color:green;font-weight:bold'>安全：未检测到敏感信息。</p>")
+        html.append("</div>")
+
+        return status, viz_path, rows, "\n".join(html)
+    except Exception as exc:
+        return f"检测失败：{exc}", None, [], ""
 
 
 def build_demo() -> gr.Blocks:
@@ -628,6 +687,46 @@ def build_demo() -> gr.Blocks:
                     attack_files,
                     evaluation_summary,
                     evaluation_report,
+                ],
+            )
+
+        with gr.Tab("敏感信息识别测试"):
+            gr.Markdown("### 敏感信息识别测试 (单模块测试)\n此界面用于测试 OCR 和敏感信息检测模块对单张图片的识别效果，可用于手动验证对抗样本是否成功欺骗了检测器。")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    test_input_file = gr.Image(label="上传待测试图像", type="filepath")
+                    test_lang = gr.Dropdown(choices=["ch", "en"], value="ch", label="OCR 语言")
+                    with gr.Row():
+                        test_use_nlp = gr.Checkbox(value=True, label="启用 NLP")
+                        test_use_uie = gr.Checkbox(value=True, label="启用 UIE")
+                    test_uie_model = gr.Textbox(value="uie-x-base", label="UIE 模型")
+                    run_test_btn = gr.Button("开始识别测试", variant="primary")
+                
+                with gr.Column(scale=1):
+                    test_status = gr.Textbox(label="检测状态", interactive=False)
+                    test_result_html = gr.HTML(label="风险评估摘要")
+                    test_viz_output = gr.Image(label="识别结果可视化")
+
+            test_results_table = gr.Dataframe(
+                headers=["页码", "序号", "敏感类型", "识别文本", "命中项数"],
+                datatype=["number", "number", "str", "str", "number"],
+                label="详细检测列表"
+            )
+
+            run_test_btn.click(
+                fn=run_standalone_detection,
+                inputs=[
+                    test_input_file,
+                    test_lang,
+                    test_use_nlp,
+                    test_use_uie,
+                    test_uie_model,
+                ],
+                outputs=[
+                    test_status,
+                    test_viz_output,
+                    test_results_table,
+                    test_result_html,
                 ],
             )
 
