@@ -118,6 +118,13 @@ def _run_pipeline(args: argparse.Namespace) -> None:
         advbox_spsa_sigma=args.advbox_spsa_sigma,
         advbox_spsa_samples=args.advbox_spsa_samples,
         advbox_text_change_bonus=args.advbox_text_change_bonus,
+        ctc_model=args.ctc_model,
+        ctc_charset_path=args.ctc_charset_file,
+        ctc_blank_index=args.ctc_blank_index,
+        ctc_layout_hint=args.ctc_layout_hint,
+        ctc_random_start=args.ctc_random_start,
+        ctc_spsa_sigma=args.ctc_spsa_sigma,
+        ctc_spsa_samples=args.ctc_spsa_samples,
         image_scale=args.image_scale,
     )
 
@@ -164,7 +171,7 @@ def main() -> None:
     pipeline_parser.add_argument("--use-ppstructure", dest="use_ppstructure", action="store_true")
     pipeline_parser.add_argument("--no-ppstructure", dest="use_ppstructure", action="store_false")
 
-    pipeline_parser.add_argument("--attack-method", choices=["random", "pgd", "advbox_roi"], default="pgd")
+    pipeline_parser.add_argument("--attack-method", choices=["random", "pgd", "advbox_roi", "ctc_pgd"], default="pgd")
     pipeline_parser.add_argument("--epsilon", type=float, default=24.0)
     pipeline_parser.add_argument("--alpha", type=float, default=6.0)
     pipeline_parser.add_argument("--steps", type=int, default=9)
@@ -179,6 +186,14 @@ def main() -> None:
     pipeline_parser.add_argument("--advbox-spsa-sigma", type=float, default=2.0)
     pipeline_parser.add_argument("--advbox-spsa-samples", type=int, default=4)
     pipeline_parser.add_argument("--advbox-text-change-bonus", type=float, default=0.5)
+    pipeline_parser.add_argument("--ctc-model", default=None)
+    pipeline_parser.add_argument("--ctc-charset-file", default=None)
+    pipeline_parser.add_argument("--ctc-blank-index", type=int, default=0)
+    pipeline_parser.add_argument("--ctc-layout-hint", choices=["auto", "time_major", "batch_major"], default="auto")
+    pipeline_parser.add_argument("--ctc-random-start", dest="ctc_random_start", action="store_true")
+    pipeline_parser.add_argument("--ctc-no-random-start", dest="ctc_random_start", action="store_false")
+    pipeline_parser.add_argument("--ctc-spsa-sigma", type=float, default=2.0)
+    pipeline_parser.add_argument("--ctc-spsa-samples", type=int, default=4)
     pipeline_parser.add_argument("--image-scale", type=float, default=1.0)
 
     pipeline_parser.set_defaults(use_nlp=True)
@@ -186,6 +201,7 @@ def main() -> None:
     pipeline_parser.set_defaults(use_ppstructure=True)
     pipeline_parser.set_defaults(force_bbox_fallback=True)
     pipeline_parser.set_defaults(adaptive_missing_cells=True)
+    pipeline_parser.set_defaults(ctc_random_start=True)
 
     args = parser.parse_args()
 

@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 from .advbox_generator import AdvBoxROIAttackParams, run_advbox_roi_attack
+from .ctc_whitebox import CtcAttackConfig, build_paddle_layer_ctc_attack
 from src.image_preprocessing import ImagePreprocessor, PreprocessConfig
 from src.table_extraction import convert_ocr_result_to_boxes, load_images_from_file
 from src.utils.paddle_runtime import resolve_paddle_use_gpu
@@ -52,6 +53,14 @@ class AttackConfig:
     advbox_spsa_samples: int = 4
     advbox_text_change_bonus: float = 0.5
     advbox_rec_model: str = "PP-OCRv5_server_rec"
+    ctc_model: Any = None
+    ctc_charset: Optional[str] = None
+    ctc_charset_path: Optional[str] = None
+    ctc_blank_index: int = 0
+    ctc_layout_hint: str = "auto"
+    ctc_random_start: bool = True
+    ctc_spsa_sigma: float = 2.0
+    ctc_spsa_samples: int = 4
     enable_mkldnn: bool = False
     num_threads: int = 0
     image_scale: float = 1.0
@@ -85,8 +94,10 @@ class AdversarialPerturbator:
         self._adaptive_ocr_model = None
         self._adaptive_detector = None
         self._advbox_recognizer = None
+        self._ctc_attack = None
         self._pgd_fallback_warned = False
         self._advbox_fallback_warned = False
+        self._ctc_fallback_warned = False
         self._advbox_backend = self._detect_advbox_backend()
         self._configure_runtime()
 
@@ -196,6 +207,17 @@ class AdversarialPerturbator:
         attack_method = (self.config.attack_method or "random").strip().lower().replace("-", "_")
 
         for bbox in sensitive_bboxes:
+            cell_text = ""
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    continue
+                bbox_candidate = cell.get("bbox")
+                if not self._is_valid_bbox(bbox_candidate):
+                    continue
+                if self._bbox_overlap_ratio(bbox, bbox_candidate) >= 0.8:
+                    cell_text = str(cell.get("text", "")).strip()
+                    break
+
             x1, y1, x2, y2 = self._sanitize_bbox(bbox, image.shape[1], image.shape[0])
             if attack_method == "advbox_roi" and int(self.config.advbox_roi_expand) > 0:
                 x1, y1, x2, y2 = self._expand_bbox(
@@ -242,6 +264,14 @@ class AdversarialPerturbator:
                     roi_delta=roi_delta,
                     original_roi=original[y1:y2, x1:x2],
                     writable_3c=writable_3c,
+                    rng=rng,
+                )
+            elif attack_method == "ctc_pgd":
+                roi_delta = self._optimize_delta_ctc_pgd(
+                    roi_delta=roi_delta,
+                    original_roi=original[y1:y2, x1:x2],
+                    writable_3c=writable_3c,
+                    target_text=cell_text,
                     rng=rng,
                 )
             elif attack_method == "pgd":
@@ -359,6 +389,57 @@ class AdversarialPerturbator:
             delta_t.stop_gradient = False
 
         return (delta_t.numpy() * 255.0).astype(np.float32)
+
+    def _optimize_delta_ctc_pgd(
+        self,
+        roi_delta: np.ndarray,
+        original_roi: np.ndarray,
+        writable_3c: np.ndarray,
+        target_text: str,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        if not target_text:
+            if not self._ctc_fallback_warned:
+                print("Warning: no cell text available for ctc_pgd; fallback to PGD surrogate.")
+                self._ctc_fallback_warned = True
+            return self._optimize_delta_pgd(
+                roi_delta=roi_delta,
+                original_roi=original_roi,
+                writable_3c=writable_3c,
+                rng=rng,
+            )
+
+        if self.config.ctc_model is None:
+            raise ValueError(
+                "ctc_pgd requires AttackConfig.ctc_model to be set to a Paddle recognition model name, model directory, or callable layer"
+            )
+
+        if self._ctc_attack is None:
+            ctc_cfg = CtcAttackConfig(
+                epsilon=float(self.config.epsilon),
+                alpha=float(self.config.alpha),
+                steps=max(1, int(self.config.steps)),
+                blank_index=int(self.config.ctc_blank_index),
+                random_start=bool(self.config.ctc_random_start),
+                layout_hint=str(self.config.ctc_layout_hint or "auto"),
+                spsa_sigma=float(self.config.ctc_spsa_sigma),
+                spsa_samples=max(1, int(self.config.ctc_spsa_samples)),
+            )
+            self._ctc_attack = build_paddle_layer_ctc_attack(
+                model=self.config.ctc_model,
+                charset=self.config.ctc_charset,
+                charset_path=self.config.ctc_charset_path,
+                config=ctc_cfg,
+                layout_hint=str(self.config.ctc_layout_hint or "auto"),
+            )
+
+        return self._ctc_attack.attack(
+            image=original_roi,
+            target_text=target_text,
+            writable_mask=writable_3c,
+            delta_init=roi_delta,
+            rng=rng,
+        )
 
     def _optimize_delta_advbox_roi(
         self,
@@ -683,6 +764,25 @@ class AdversarialPerturbator:
         x2 = min(width, x2 + extra)
         y2 = min(height, y2 + extra)
         return x1, y1, x2, y2
+
+    @staticmethod
+    def _bbox_overlap_ratio(a: Sequence[float], b: Sequence[float]) -> float:
+        if not AdversarialPerturbator._is_valid_bbox(a) or not AdversarialPerturbator._is_valid_bbox(b):
+            return 0.0
+        ax1 = float(min(a[0], a[2]))
+        ay1 = float(min(a[1], a[3]))
+        ax2 = float(max(a[0], a[2]))
+        ay2 = float(max(a[1], a[3]))
+        bx1 = float(min(b[0], b[2]))
+        by1 = float(min(b[1], b[3]))
+        bx2 = float(max(b[0], b[2]))
+        by2 = float(max(b[1], b[3]))
+        inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+        inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+        inter = inter_w * inter_h
+        area_a = max(1e-6, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(1e-6, (bx2 - bx1) * (by2 - by1))
+        return float(inter / min(area_a, area_b))
 
     def _build_line_protection_mask(self, image: np.ndarray, cells: Sequence[Dict[str, Any]]) -> np.ndarray:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

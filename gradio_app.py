@@ -3,13 +3,76 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
+# 1. 禁用 Gradio 遥测和模型源检查
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
+os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"      # 关键：跳过模型源连通性检查
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"           # 禁止 HuggingFace 遥测
+os.environ["TRANSFORMERS_OFFLINE"] = "1"               # Transformers 离线模式
+os.environ["HF_HUB_DISABLE_IMPORT_CHECK"] = "1"        # 禁止导入检查
+
+# 2. 提前打好 HTTP 补丁（防止 gradio 加载时绑定原始函数）
+import httpx
+from urllib.parse import urlparse
+
+_original_get = httpx.get
+_original_post = httpx.post
+
+def _patched_get(url, *args, **kwargs):
+    host = urlparse(url).hostname
+    # 放行本地和内网请求
+    if host in ("127.0.0.1", "localhost", None) or (host and host.startswith(("192.168.", "10."))):
+        return _original_get(url, *args, **kwargs)
+    print(f"[Blocked] GET {url}")
+    # 返回一个看起来正常的 200 响应，body 为空 JSON
+    return httpx.Response(200, json={})
+
+def _patched_post(url, *args, **kwargs):
+    host = urlparse(url).hostname
+    if host in ("127.0.0.1", "localhost", None) or (host and host.startswith(("192.168.", "10."))):
+        return _original_post(url, *args, **kwargs)
+    print(f"[Blocked] POST {url}")
+    return httpx.Response(200, json={})
+
+httpx.get = _patched_get
+httpx.post = _patched_post
+
+# 异步客户端同样处理
+if hasattr(httpx, 'AsyncClient'):
+    _orig_aget = httpx.AsyncClient.get
+    _orig_apost = httpx.AsyncClient.post
+
+    async def _patched_aget(self, url, *args, **kwargs):
+        host = urlparse(url).hostname
+        if host in ("127.0.0.1", "localhost", None) or (host and host.startswith(("192.168.", "10."))):
+            return await _orig_aget(self, url, *args, **kwargs)
+        print(f"[Blocked] Async GET {url}")
+        return httpx.Response(200, json={})
+
+    async def _patched_apost(self, url, *args, **kwargs):
+        host = urlparse(url).hostname
+        if host in ("127.0.0.1", "localhost", None) or (host and host.startswith(("192.168.", "10."))):
+            return await _orig_apost(self, url, *args, **kwargs)
+        print(f"[Blocked] Async POST {url}")
+        return httpx.Response(200, json={})
+
+    httpx.AsyncClient.get = _patched_aget
+    httpx.AsyncClient.post = _patched_apost
+
+# 以上代码必须放在 import gradio 之前
+# 然后再导入你的其他模块（包括 gradio）
+
 import argparse
 import json
-import os
 import socket
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+# import os
+# os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import gradio as gr
 
@@ -742,13 +805,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # 无需任何猴子补丁
     args = parse_args()
     demo = build_demo()
     demo.queue(max_size=16)
     launch_port = _find_free_port(args.port, args.host)
     if launch_port != args.port:
         print(f"Port {args.port} is busy, falling back to {launch_port}.")
-    demo.launch(server_name=args.host, server_port=launch_port, share=args.share)
+    demo.launch(server_name="127.0.0.1", server_port=launch_port, share=False)
 
 
 if __name__ == "__main__":

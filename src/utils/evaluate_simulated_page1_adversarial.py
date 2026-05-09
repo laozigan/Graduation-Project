@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import cv2
 from paddleocr import TextRecognition
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.adversarial_gen.perturbator import (
     AttackConfig,
@@ -312,12 +316,17 @@ def main() -> None:
     attack_cfg = AttackConfig(
         epsilon=36.0,
         alpha=9.0,
-        steps=12,
+        steps=2,  # [Fast Test] Reduced from 12 to 2 to bypass CPU SPSA bottleneck
+        attack_method="ctc_pgd",
         seed=2026,
         bbox_margin=0,
         line_protect_width=1,
         force_bbox_fallback=True,
         adaptive_detect_missing_cells=True,
+        ctc_model="PP-OCRv5_server_rec",
+        ctc_random_start=False,
+        ctc_spsa_sigma=2.0,
+        ctc_spsa_samples=1,  # Keep at 1 for minimum forward passes
     )
 
     _extract_page1_image_and_gt(paths, dpi=args.dpi)

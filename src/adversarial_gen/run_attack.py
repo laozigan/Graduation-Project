@@ -56,9 +56,9 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=9, help="Iteration count")
     parser.add_argument(
         "--attack-method",
-        choices=["random", "pgd", "advbox_roi"],
+        choices=["random", "pgd", "advbox_roi", "ctc_pgd"],
         default="pgd",
-        help="Perturbation strategy: random, PGD surrogate, or advbox-style ROI optimizer",
+        help="Perturbation strategy: random, PGD surrogate, CTC white-box PGD, or advbox-style ROI optimizer",
     )
     parser.add_argument("--seed", type=int, default=2026, help="Random seed")
     parser.add_argument("--bbox-margin", type=int, default=2, help="Skip bbox borders by N pixels")
@@ -75,6 +75,14 @@ def main() -> None:
     parser.add_argument("--advbox-spsa-samples", type=int, default=4, help="SPSA sample count for recognition-gradient estimation")
     parser.add_argument("--advbox-text-change-bonus", type=float, default=0.5, help="Objective bonus when OCR text changes from original")
     parser.add_argument("--advbox-rec-model", type=str, default="PP-OCRv5_server_rec", help="PaddleOCR recognition model name used by advbox_roi")
+    parser.add_argument("--ctc-model", type=str, default=None, help="Raw-recognition model name or local model directory used by ctc_pgd")
+    parser.add_argument("--ctc-charset-file", type=str, default=None, help="Charset file for CTC label encoding")
+    parser.add_argument("--ctc-blank-index", type=int, default=0, help="CTC blank index")
+    parser.add_argument("--ctc-layout-hint", choices=["auto", "time_major", "batch_major"], default="auto", help="Raw logits layout")
+    parser.add_argument("--ctc-random-start", dest="ctc_random_start", action="store_true", help="Enable random start for CTC PGD")
+    parser.add_argument("--ctc-no-random-start", dest="ctc_random_start", action="store_false", help="Disable random start for CTC PGD")
+    parser.add_argument("--ctc-spsa-sigma", type=float, default=2.0, help="SPSA sigma used by CTC fallback estimators")
+    parser.add_argument("--ctc-spsa-samples", type=int, default=4, help="SPSA sample count used by CTC fallback estimators")
     parser.add_argument("--enable-mkldnn", dest="enable_mkldnn", action="store_true", help="Enable MKLDNN acceleration for Paddle CPU ops")
     parser.add_argument("--disable-mkldnn", dest="enable_mkldnn", action="store_false", help="Disable MKLDNN acceleration")
     parser.add_argument("--num-threads", type=int, default=0, help="CPU threads for OpenCV/BLAS runtime, 0 keeps default")
@@ -96,6 +104,7 @@ def main() -> None:
     parser.set_defaults(auto_orient=None)
     parser.set_defaults(force_bbox_fallback=True)
     parser.set_defaults(adaptive_missing_cells=True)
+    parser.set_defaults(ctc_random_start=True)
     parser.set_defaults(enable_mkldnn=False)
     args = parser.parse_args()
 
@@ -161,6 +170,13 @@ def main() -> None:
         advbox_spsa_samples=args.advbox_spsa_samples,
         advbox_text_change_bonus=args.advbox_text_change_bonus,
         advbox_rec_model=args.advbox_rec_model,
+        ctc_model=args.ctc_model,
+        ctc_charset_path=args.ctc_charset_file,
+        ctc_blank_index=args.ctc_blank_index,
+        ctc_layout_hint=args.ctc_layout_hint,
+        ctc_random_start=args.ctc_random_start,
+        ctc_spsa_sigma=args.ctc_spsa_sigma,
+        ctc_spsa_samples=args.ctc_spsa_samples,
         enable_mkldnn=args.enable_mkldnn,
         num_threads=args.num_threads,
         image_scale=args.image_scale,
